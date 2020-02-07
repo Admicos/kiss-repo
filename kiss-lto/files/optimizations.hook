@@ -2,48 +2,33 @@
 
 # https://unix.stackexchange.com/a/311761
 __remove() (
-  set -f
-  IFS=' '
-
-  s=$1
-  w=$2
-
-  set -- $1
-  for arg do
-    shift
-    [ "$arg" = "$w" ] && continue
-    set -- "$@" "$arg"
-  done
-
-  printf '%s\n' "$*"
+    printf "$(echo "$1" | sed "s/$2//g")"
 )
 
 # TODO: make all this more efficient
 ####################################
 
 __rem() {
-    pkg="$1"
-    flag="$2"
+    if [ "$1" = "$PKG" ]; then
+        log "Applying workaround: Remove $2"
 
-    if [ "$pkg" == "$PKG" ]; then
-        log "Applying workaround: Remove $flag"
+        CFLAGS="$(__remove "$CFLAGS" "$2")"
+        CXXFLAGS="$(__remove "$CXXFLAGS" "$2")"
+        LDFLAGS="$(__remove "$LDFLAGS" "$2")"
 
-        export CFLAGS="$(__remove "$CFLAGS" "$flag")"
-        export CXXFLAGS="$(__remove "$CXXFLAGS" "$flag")"
-        export LDFLAGS="$(__remove "$LDFLAGS" "$flag")"
+        export CFLAGS
+        export CXXFLAGS
+        export LDFLAGS
     fi
 }
 
 __add() {
-    pkg="$1"
-    flag="$2"
+    if [ "$1" = "$PKG" ]; then
+        log "Applying workaround: Add $2"
 
-    if [ "$pkg" == "$PKG" ]; then
-        log "Applying workaround: Add $flag"
-
-        export CFLAGS="$CFLAGS $flag"
-        export CXXFLAGS="$CXXFLAGS $flag"
-        export LDFLAGS="$LDFLAGS $flag"
+        export CFLAGS="$CFLAGS $2"
+        export CXXFLAGS="$CXXFLAGS $2"
+        export LDFLAGS="$LDFLAGS $2"
     fi
 }
 
