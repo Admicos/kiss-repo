@@ -1,0 +1,26 @@
+#!/bin/sh -ef
+
+if ! [ "$KISS_HOOKED_ROOT" ]; then
+    KISS_HOOKED_ROOT="/etc/kiss-hooked"
+fi
+
+_hook_process() {
+    _hooks="$KISS_HOOKED_ROOT/$TYPE"
+
+    if [ -d "$_hooks" ]; then
+        set +f
+        for hook in "$_hooks/"*.hook; do
+            . "$hook"
+        done
+        set -f
+    else
+        log "No hooks found. Continuing as usual"
+    fi
+}
+
+if [ "$TYPE" ] && [ "$PKG" ] && [ "$DEST" ]; then
+    _hook_process
+else
+    canonical=$(cd -P -- "$(dirname -- "$0")" && printf '%s\n' "$(pwd -P)/$(basename -- "$0")")
+    echo "export KISS_HOOK='$canonical' # enable hooked"
+fi

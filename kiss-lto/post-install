@@ -1,0 +1,27 @@
+#!/bin/sh -e
+
+cat <<EOF
+
+Optimization workarounds have been installed.
+
+To enable the workarounds, run the following:
+
+    $ kiss-hooked > /etc/profile.d/kiss-hooked.sh
+    $ source /etc/profile
+
+Also, don't forget to modify your C(XX)FLAGS to actually start optimizing!
+
+The tested flags are as follows:
+
+# -falign-functions=32 is Intel specific, AMD CPUs won't gain any improvements
+# -fgraphite-identity and -floop-nest-optimize will not work if you haven't
+# built GCC --with-isl
+
+export CFLAGS="-O3 -pipe -march=native -mtune=native -falign-functions=32 -fgraphite-identity -floop-nest-optimize -fdevirtualize-at-ltrans -fno-semantic-interposition -fipa-pta -flto=$(nproc) -fno-common"
+export CXXFLAGS="\${CFLAGS}"
+export LDFLAGS="-Wl,-O1 -Wl,--as-needed \${CFLAGS}"
+
+export AR=gcc-ar
+export NM=gcc-nm
+export RANLIB=gcc-ranlib
+EOF

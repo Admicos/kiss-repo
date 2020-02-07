@@ -1,0 +1,91 @@
+# vim: set ft=sh :
+
+# https://unix.stackexchange.com/a/311761
+__remove() (
+  set -f
+  IFS=' '
+
+  s=$1
+  w=$2
+
+  set -- $1
+  for arg do
+    shift
+    [ "$arg" = "$w" ] && continue
+    set -- "$@" "$arg"
+  done
+
+  printf '%s\n' "$*"
+)
+
+# TODO: make all this more efficient
+####################################
+
+__rem() {
+    pkg="$1"
+    flag="$2"
+
+    if [ "$pkg" == "$PKG" ]; then
+        log "Applying workaround: Remove $flag"
+
+        export CFLAGS="$(__remove "$CFLAGS" "$flag")"
+        export CXXFLAGS="$(__remove "$CXXFLAGS" "$flag")"
+        export LDFLAGS="$(__remove "$LDFLAGS" "$flag")"
+    fi
+}
+
+__add() {
+    pkg="$1"
+    flag="$2"
+
+    if [ "$pkg" == "$PKG" ]; then
+        log "Applying workaround: Add $flag"
+
+        export CFLAGS="$CFLAGS $flag"
+        export CXXFLAGS="$CXXFLAGS $flag"
+        export LDFLAGS="$LDFLAGS $flag"
+    fi
+}
+
+# Workarounds begin here
+########################
+
+ltoflag="-flto=$(nproc)"
+
+__rem "musl" "$ltoflag"
+__rem "mandoc" "$ltoflag"
+__rem "gcc" "$ltoflag"
+__rem "e2fsprogs" "$ltoflag"
+__rem "ncurses" "$ltoflag"
+__rem "grub" "$ltoflag"
+__rem "xorg-server" "$ltoflag"
+__rem "xf86-video-intel" "$ltoflag"
+__rem "xf86-video-amdgpu" "$ltoflag"
+__rem "rxvt-unicode" "$ltoflag"
+__rem "alsa-lib" "$ltoflag"
+__rem "ffmpeg" "$ltoflag"
+
+__rem "curl" "-fno-common"
+__rem "pkgconf" "-fno-common"
+__rem "nvim" "-fno-common"
+__rem "libdrm" "-fno-common"
+__rem "mesa" "-fno-common"
+__rem "htop" "-fno-common"
+__rem "xf86-video-intel" "-fno-common"
+__rem "xf86-video-amdgpu" "-fno-common"
+__rem "bspwm" "-fno-common"
+__rem "sxhkd" "-fno-common"
+__rem "fribidi" "-fno-common"
+
+__rem "bspwm" "-fipa-pta"
+
+
+__add "busybox" "-ffat-lto-objects"
+__add "libressl" "-ffat-lto-objects"
+__add "zlib" "-ffat-lto-objects"
+__add "python" "-ffat-lto-objects"
+__add "cmake" "-ffat-lto-objects"
+__add "llvm" "-ffat-lto-objects"
+__add "libjpeg-turbo" "-ffat-lto-objects"
+__add "libvpx" "-ffat-lto-objects"
+__add "x264" "-ffat-lto-objects"
