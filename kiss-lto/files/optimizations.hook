@@ -1,6 +1,5 @@
 # vim: set ft=sh :
 
-# https://unix.stackexchange.com/a/311761
 __remove() (
     printf "$(echo "$1" | sed "s/$2//g")"
 )
@@ -61,6 +60,7 @@ __rem "xf86-video-amdgpu" "-fno-common"
 __rem "bspwm" "-fno-common"
 __rem "sxhkd" "-fno-common"
 __rem "fribidi" "-fno-common"
+__rem "mandoc" "-fno-common"
 
 __rem "bspwm" "-fipa-pta"
 
