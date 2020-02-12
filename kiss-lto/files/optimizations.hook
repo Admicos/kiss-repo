@@ -1,7 +1,7 @@
 # vim: set ft=sh :
 
 __remove() (
-    printf "$(echo "$1" | sed "s/$2//g")"
+    echo -n "$(echo "$1" | sed "s/$2//g")"
 )
 
 # TODO: make all this more efficient
