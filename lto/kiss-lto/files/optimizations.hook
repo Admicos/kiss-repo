@@ -63,8 +63,6 @@ __add "curl" "-fcommon"
 __add "libressl" "-ffat-lto-objects"
 __add "zlib" "-ffat-lto-objects"
 
-#__add "llvm" "-ffat-lto-objects" # todo
-
 # Outdated untested workarounds, they might still be needed
 ###########################################################
 
