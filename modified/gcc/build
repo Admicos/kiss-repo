@@ -16,7 +16,7 @@ cd gcc-build
 IFS=. read -r gcc_version _ 2>/dev/null \
     < "$KISS_ROOT/var/db/kiss/installed/gcc/version" || gcc_version=null
 
-# using profiledbootstrap requires bootstrap
+# using bootstrap-lto-lean requires bootstrap
 
 # Skip the bootstrap process if we are able.
 #case $2 in "$gcc_version"*)
