@@ -36,41 +36,51 @@ __add() {
 
 ltoflag="-flto=$(nproc)"
 
-__rem "musl" "$ltoflag"
-__rem "mandoc" "$ltoflag"
+# Maybe this might work:
+# https://www.openwall.com/lists/musl/2015/04/28/6
+__rem "musl" "$ltoflag" 
+
+# Uses custom configuration
+# see the modified/gcc package
 __rem "gcc" "$ltoflag"
-__rem "e2fsprogs" "$ltoflag"
-__rem "ncurses" "$ltoflag"
+
+# various build-grub-module-verifier errors
 __rem "grub" "$ltoflag"
-__rem "xorg-server" "$ltoflag"
+
+# Linking will eat up all my available memory
 __rem "xf86-video-intel" "$ltoflag"
-__rem "xf86-video-amdgpu" "$ltoflag"
-__rem "rxvt-unicode" "$ltoflag"
-__rem "alsa-lib" "$ltoflag"
-__rem "ffmpeg" "$ltoflag"
 
-__rem "curl" "-fno-common"
-__rem "pkgconf" "-fno-common"
-__rem "nvim" "-fno-common"
-__rem "libdrm" "-fno-common"
-__rem "mesa" "-fno-common"
-__rem "htop" "-fno-common"
-__rem "xf86-video-intel" "-fno-common"
-__rem "xf86-video-amdgpu" "-fno-common"
-__rem "bspwm" "-fno-common"
-__rem "sxhkd" "-fno-common"
-__rem "fribidi" "-fno-common"
-__rem "mandoc" "-fno-common"
+# https://bugs.gentoo.org/700012
+__add "python" "-ffat-lto-objects"
 
-__rem "bspwm" "-fipa-pta"
+# todo: use a patch from:
+# https://bugs.gentoo.org/497714
+__add "x264" "-ffat-lto-objects"
 
-
-__add "busybox" "-ffat-lto-objects"
+# Curl is kind of weird
+# Also see "Other workarounds"
+__add "curl" "-fcommon"
 __add "libressl" "-ffat-lto-objects"
 __add "zlib" "-ffat-lto-objects"
-__add "python" "-ffat-lto-objects"
-__add "cmake" "-ffat-lto-objects"
-__add "llvm" "-ffat-lto-objects"
-__add "libjpeg-turbo" "-ffat-lto-objects"
-__add "libvpx" "-ffat-lto-objects"
-__add "x264" "-ffat-lto-objects"
+
+#__add "llvm" "-ffat-lto-objects" # todo
+
+# Outdated untested workarounds, they might still be needed
+###########################################################
+
+#__rem "rxvt-unicode" "$ltoflag"
+#__rem "bspwm" "-fipa-pta"
+
+# Other workarounds
+###################
+
+# Some packages fail to build. It seems like it's fixed in
+# binutils, but KISS probably doesn't have it yet.
+# https://bugs.gentoo.org/708340
+# https://sourceware.org/bugzilla/show_bug.cgi?id=25355
+if [ "$PKG" = "curl" ] || [ "$PKG" = "fribidi" ] || [ "$PKG" = "xcb-util-cursor" ]; then
+    export lt_cv_sys_global_symbol_pipe="sed -n -e 's/^.*[ ]\\([ABCDGIRSTW][ABCDGIRSTW]*\\)[ ][ ]*\\([_A-Za-z][_A-Za-z0-9]*\\)\$/\\1 \\2 \\2/p' | sed '/ __gnu_lto/d'"
+    export lt_cv_sys_global_symbol_to_cdecl=""
+
+    log "Libtool workarounds applied"
+fi

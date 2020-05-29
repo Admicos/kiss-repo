@@ -15,9 +15,9 @@ The tested flags are as follows:
 
 # -falign-functions=32 is Intel specific, AMD CPUs won't gain any improvements
 # -fgraphite-identity and -floop-nest-optimize will not work if you haven't
-# built GCC --with-isl
+# built GCC --with-isl. See the gcc package in my 'modified' repository.
 
-export CFLAGS="-O3 -pipe -march=native -mtune=native -falign-functions=32 -fgraphite-identity -floop-nest-optimize -fdevirtualize-at-ltrans -fno-semantic-interposition -fipa-pta -flto=$(nproc) -fno-common"
+export CFLAGS="-O3 -pipe -march=native -mtune=native -falign-functions=32 -fgraphite-identity -floop-nest-optimize -fdevirtualize-at-ltrans -fno-semantic-interposition -fipa-pta -flto=$(nproc) -fuse-linker-plugin"
 export CXXFLAGS="\${CFLAGS}"
 export LDFLAGS="-Wl,-O1 -Wl,--as-needed \${CFLAGS}"
 
