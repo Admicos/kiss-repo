@@ -50,6 +50,27 @@ __rem "grub" "$ltoflag"
 # Linking will eat up all my available memory
 __rem "xf86-video-intel" "$ltoflag"
 
+# RUSTFLAGS will probably be the way to go
+# once this bug gets fixed:
+# https://github.com/rust-lang/rust/issues/49175
+__rem "rust" "$ltoflag"
+
+# X didn't start without at least some of these
+# Most of these will be unneccesary. I just went
+# completely safe.
+__rem "mesa" "$ltoflag"
+__rem "xf86-video-amdgpu" "$ltoflag"
+__rem "xorg-server" "$ltoflag"
+__rem "llvm" "-fno-semantic-interposition"
+
+__add "xcb-util-cursor" "-fcommon"
+__add "xcb-util-xrm" "-fcommon"
+
+__add "mesa" "-fcommon"
+__add "xorg-server" "-fcommon"
+__add "xf86-video-intel" "-fcommon"
+__add "xf86-video-amdgpu" "-fcommon"
+
 # https://bugs.gentoo.org/700012
 __add "python" "-ffat-lto-objects"
 
@@ -62,6 +83,7 @@ __add "x264" "-ffat-lto-objects"
 __add "curl" "-fcommon"
 __add "libressl" "-ffat-lto-objects"
 __add "zlib" "-ffat-lto-objects"
+
 
 # Outdated untested workarounds, they might still be needed
 ###########################################################
@@ -76,7 +98,7 @@ __add "zlib" "-ffat-lto-objects"
 # binutils, but KISS probably doesn't have it yet.
 # https://bugs.gentoo.org/708340
 # https://sourceware.org/bugzilla/show_bug.cgi?id=25355
-if [ "$PKG" = "curl" ] || [ "$PKG" = "fribidi" ] || [ "$PKG" = "xcb-util-cursor" ]; then
+if [ "$PKG" = "curl" ] || [ "$PKG" = "fribidi" ] || [ "$PKG" = "xcb-util-cursor" ] || [ "$PKG" = "jq" ]; then
     export lt_cv_sys_global_symbol_pipe="sed -n -e 's/^.*[ ]\\([ABCDGIRSTW][ABCDGIRSTW]*\\)[ ][ ]*\\([_A-Za-z][_A-Za-z0-9]*\\)\$/\\1 \\2 \\2/p' | sed '/ __gnu_lto/d'"
     export lt_cv_sys_global_symbol_to_cdecl=""
 
