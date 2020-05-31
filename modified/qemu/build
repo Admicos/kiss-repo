@@ -1,0 +1,21 @@
+#!/bin/sh -e
+
+for patch in *.patch; do
+    patch -p0 < "$patch"
+done
+
+./configure \
+    --prefix=/usr \
+    --localstatedir=/var \
+    --sysconfdir=/etc \
+    --target-list=x86_64-softmmu,i386-softmmu \
+    --disable-debug-info \
+    --disable-gtk \
+    --disable-docs \
+    --enable-sdl \
+    --enable-kvm \
+    --enable-pie \
+    --enable-curses
+
+make
+make DESTDIR="$1" PREFIX=/usr install
