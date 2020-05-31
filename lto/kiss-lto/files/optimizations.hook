@@ -84,6 +84,14 @@ __add "curl" "-fcommon"
 __add "libressl" "-ffat-lto-objects"
 __add "zlib" "-ffat-lto-objects"
 
+# relocation against undefined symbol can not be
+# used when making a shared object
+# Also, FFmpeg has it's own LTO settings.
+# See modified/ffmpeg
+__rem "ffmpeg" "$ltoflag"
+
+# C dependencies cause the build to fail
+__add "ripgrep" "-ffat-lto-objects"
 
 # Outdated untested workarounds, they might still be needed
 ###########################################################
@@ -98,7 +106,7 @@ __add "zlib" "-ffat-lto-objects"
 # binutils, but KISS probably doesn't have it yet.
 # https://bugs.gentoo.org/708340
 # https://sourceware.org/bugzilla/show_bug.cgi?id=25355
-if [ "$PKG" = "curl" ] || [ "$PKG" = "fribidi" ] || [ "$PKG" = "xcb-util-cursor" ] || [ "$PKG" = "jq" ]; then
+if [ "$PKG" = "curl" ] || [ "$PKG" = "fribidi" ] || [ "$PKG" = "xcb-util-cursor" ] || [ "$PKG" = "jq" ] || [ "$PKG" = "pkgconf" ]; then
     export lt_cv_sys_global_symbol_pipe="sed -n -e 's/^.*[ ]\\([ABCDGIRSTW][ABCDGIRSTW]*\\)[ ][ ]*\\([_A-Za-z][_A-Za-z0-9]*\\)\$/\\1 \\2 \\2/p' | sed '/ __gnu_lto/d'"
     export lt_cv_sys_global_symbol_to_cdecl=""
 
