@@ -1,0 +1,7 @@
+#!/bin/sh -e
+
+mkdir -p "$1/usr/share/fonts"
+mkdir -p "$1/usr/share/fontconfig/conf.avail"
+
+cp Blobmoji.ttf "$1/usr/share/fonts"
+cp 75-blobmoji.conf "$1/usr/share/fontconfig/conf.avail"
