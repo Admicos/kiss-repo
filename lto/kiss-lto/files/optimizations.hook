@@ -1,5 +1,9 @@
 # vim: set ft=sh :
 
+# BIG HUGE TODO: PACKAGE-SPECIFIC FLAGS
+# LEAK OUT OF SAID PACKAGES. THIS IS BAD
+########################################
+
 __remove() (
     echo -n "$(echo "$1" | sed "s/$2//g")"
 )
@@ -92,6 +96,17 @@ __rem "ffmpeg" "$ltoflag"
 
 # C dependencies cause the build to fail
 __add "ripgrep" "-ffat-lto-objects"
+
+# Something related to versioned symbols and lto
+__add "alsa-lib" "-flto-partition=none"
+
+# remove any maybe sorta possibly interesting flag for llvm because i cannot be arsed to wait for it to recompile for each flag change
+__rem "llvm" "-fdevirtualize-at-ltrans"
+__rem "llvm" "-fipa-pta"
+__rem "llvm" "$ltoflag"
+__rem "llvm" "-fuse-linker-plugin"
+__rem "llvm" "-fgraphite-identity"
+__rem "llvm" "-floop-nest-optimize"
 
 # Outdated untested workarounds, they might still be needed
 ###########################################################
