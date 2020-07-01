@@ -1,0 +1,8 @@
+meson
+wayland
+pango
+cairo
+gdk-pixbuf
+dbus
+
+libnotify

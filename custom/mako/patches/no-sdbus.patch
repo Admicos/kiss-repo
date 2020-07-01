@@ -1,0 +1,2877 @@
+From 68923392ee5f58fb20066827dd4b118015f7f37d Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Fri, 26 Oct 2018 15:25:36 +0200
+Subject: [PATCH 01/18] Add subd headers and sources
+
+These provide a small set of wrapper functions around the low-level
+libdbus API that act like a shim for sd-bus.
+---
+ dbus/subd-sdbus.c    | 403 +++++++++++++++++++++++++++++++++++++++++++
+ dbus/subd-vtable.c   | 337 ++++++++++++++++++++++++++++++++++++
+ dbus/subd-watch.c    | 180 +++++++++++++++++++
+ include/subd-sdbus.h | 142 +++++++++++++++
+ include/subd.h       |  41 +++++
+ 5 files changed, 1103 insertions(+)
+ create mode 100644 dbus/subd-sdbus.c
+ create mode 100644 dbus/subd-vtable.c
+ create mode 100644 dbus/subd-watch.c
+ create mode 100644 include/subd-sdbus.h
+ create mode 100644 include/subd.h
+
+diff --git a/dbus/subd-sdbus.c b/dbus/subd-sdbus.c
+new file mode 100644
+index 0000000..eccdc14
+--- /dev/null
++++ b/dbus/subd-sdbus.c
+@@ -0,0 +1,403 @@
++#include <errno.h>
++#include <stdlib.h>
++#include <string.h>
++#include "subd.h"
++
++int sd_bus_open_user(sd_bus **bus) {
++	if (!dbus_threads_init_default()) {
++		return -ENOMEM;
++	}
++
++	*bus = dbus_bus_get(DBUS_BUS_SESSION, NULL);
++	if (*bus == NULL) {
++		return -ENXIO;
++	}
++
++	return 0;
++}
++
++int sd_bus_request_name(sd_bus *bus, const char *name, int flags) {
++	if (dbus_bus_request_name(bus, name, flags, NULL) == -1) {
++		return -EEXIST;
++	}
++
++	return 0;
++}
++
++void sd_bus_slot_unref(int *slot) {
++	// not used
++}
++
++void sd_bus_flush_close_unref(sd_bus *bus) {
++	// only flush and unref, no need to dbus_connection_close shared connections
++	dbus_connection_flush(bus);
++	dbus_connection_unref(bus);
++}
++
++void sd_bus_error_set_const(sd_bus_error *err, const char *name, const char *msg) {
++	dbus_set_error_const(err, name, msg);
++}
++
++int sd_bus_message_new_method_return(sd_bus_message *msg, sd_bus_message **newmsg) {
++	sd_bus_message *new_message = NULL;
++	DBusMessage *message = NULL;
++	// Allocate a new "method return" DBusMessage
++	if ((message = dbus_message_new_method_return(msg->message)) == NULL) {
++		goto error;
++	}
++
++	// Allocate a new sd_bus_message
++	new_message = malloc(sizeof(sd_bus_message));
++	if (new_message == NULL) {
++		goto error;
++	}
++
++	// Populate the fields of the new sd_bus_message so that it knows which bus
++	// it is to be sent on, and what DBusMessage it contains.
++	new_message->bus = msg->bus;
++	new_message->message = message;
++	new_message->ref_count = 1;
++
++	//Also initialize  the sd_bus_message's iterator stack, ...
++	new_message->iters = malloc(sizeof(struct wl_list));
++	if (new_message->iters == NULL) {
++		goto error;
++	}
++	wl_list_init(new_message->iters);
++
++	// ... and push a new append iterator to it.
++	struct msg_iter *iter = malloc(sizeof(struct msg_iter));
++	if (iter == NULL) {
++		goto error;
++	}
++	dbus_message_iter_init_append(new_message->message, &iter->iter);
++	wl_list_insert(new_message->iters, &iter->link);
++	new_message->iter = &iter->iter;
++
++	*newmsg = new_message;
++	return 0;
++
++error:
++	//XXX list_destroy(new_message->iters);
++	free(new_message);
++	dbus_message_unref(message);
++	*newmsg = NULL;
++	return -ENOMEM;
++}
++
++int sd_bus_message_open_container(sd_bus_message *msg, char type,
++		const char *signature) {
++	struct msg_iter *sub = malloc(sizeof(struct msg_iter));
++	if (sub == NULL) {
++		goto error;
++	}
++
++	if (!dbus_message_iter_open_container(msg->iter, type, signature, &sub->iter)) {
++		goto error;
++	}
++	wl_list_insert(msg->iters, &sub->link);
++	msg->iter = &sub->iter;
++
++	return 0;
++
++error:
++	free(sub);
++	return -ENOMEM;
++}
++
++int sd_bus_message_close_container(sd_bus_message *msg) {
++	// Remove the iterator we want to close from from the iterator stack
++	struct msg_iter *iter = wl_container_of(msg->iters->next, iter, link);
++	wl_list_remove(&iter->link);
++
++	// Set msg's current iterator to the top of the iterator stack.
++	struct msg_iter *new_head = wl_container_of(msg->iters->next, iter, link);
++	msg->iter = &new_head->iter;
++
++	// Close the container.
++	if (!dbus_message_iter_close_container(msg->iter, &iter->iter)) {
++		return -ENOMEM;
++	}
++
++	return 0;
++}
++
++int sd_bus_message_append(sd_bus_message *msg, const char *signature, ...) {
++	if (!dbus_signature_validate(signature, NULL)) {
++		return -EINVAL;
++	}
++
++	va_list ap;
++	DBusSignatureIter iter;
++	va_start(ap, signature);
++	dbus_signature_iter_init(&iter, signature);
++
++	do {
++		int type = dbus_signature_iter_get_current_type(&iter);
++		if (!dbus_type_is_basic(type)) {
++			va_end(ap);
++			return -EINVAL;
++		}
++
++		DBusBasicValue val = va_arg(ap, DBusBasicValue);
++		if (!dbus_message_iter_append_basic(msg->iter, type, &val)) {
++			va_end(ap);
++			return -ENOMEM;
++		}
++	} while(dbus_signature_iter_next(&iter));
++
++	va_end(ap);
++	return 0;
++}
++
++void sd_bus_message_unref(sd_bus_message *msg) {
++	dbus_message_unref(msg->message);
++	if (msg->ref_count == 0) {
++		//XXX list_destroy(msg->iters);
++		free(msg);
++	}
++}
++
++int sd_bus_message_peek_type(sd_bus_message *msg, void *unused,
++		const char **signature) {
++	char *s = dbus_message_iter_get_signature(msg->iter);
++	if (s == NULL) {
++		return -ENOMEM;
++	}
++
++	*signature = strdup(s);
++	dbus_free(s);
++	return 0;
++}
++
++int sd_bus_message_readv(sd_bus_message *msg, const char *signature, va_list ap) {
++	// Immediately return 0 if there are not arguments to read.
++	if (dbus_message_iter_get_arg_type(msg->iter) == DBUS_TYPE_INVALID) {
++		return 0;
++	}
++
++	DBusSignatureIter iter;
++	dbus_signature_iter_init(&iter, signature);
++	do {
++		// Bail out if the signature contains a non-basic type.
++		int type = dbus_signature_iter_get_current_type(&iter);
++		if (!dbus_type_is_basic(type)) {
++			va_end(ap);
++			return -EINVAL;
++		}
++
++		// Bail out if signature does not match the actual argument.
++		if (dbus_message_iter_get_arg_type(msg->iter) != type) {
++			return -ENXIO;
++		}
++
++		// Read the value.
++		DBusBasicValue *ptr = va_arg(ap, DBusBasicValue *);
++		if (ptr != NULL) {
++			dbus_message_iter_get_basic(msg->iter, ptr);
++		}
++
++		// Don't check for "no more args" condition here, since it is possible
++		// that there are no more elements in the signature either. The erronous
++		// "signature not ended, but no more args" scenario is dealt with at the
++		// beginning of the loop body by DBUS_TYPE_INVALID not being a basic
++		// type.
++		dbus_message_iter_next(msg->iter);
++	} while (dbus_signature_iter_next(&iter));
++
++	return dbus_message_iter_has_next(msg->iter);
++}
++
++int sd_bus_message_read(sd_bus_message *msg, const char *signature, ...) {
++	int ret = 0;
++	va_list ap;
++	va_start(ap, signature);
++
++	// NOTE: There is a difference here between the real sd_bus_message_read and
++	// this wrapper. We only support messages that
++	//  - contain a variant type that contain only basic types,
++	//  - or contain only basic types.
++	//
++	// This is currently enough for Mako, but I left this note in case this
++	// function needs to be expanded in the future.
++	if (strcmp(signature, "v") == 0) {
++		const char *inner_signature = va_arg(ap, char *);
++		sd_bus_message_enter_container(msg, 'v', inner_signature);
++		ret = sd_bus_message_readv(msg, inner_signature, ap);
++		sd_bus_message_exit_container(msg);
++	} else {
++		ret = sd_bus_message_readv(msg, signature, ap);
++	}
++
++	va_end(ap);
++	return ret;
++}
++
++int sd_bus_message_skip(sd_bus_message *msg, const char *signature) {
++	// Immediately return 0 if there are not arguments to read.
++	if (dbus_message_iter_get_arg_type(msg->iter) == DBUS_TYPE_INVALID) {
++		return 0;
++	}
++
++	DBusSignatureIter iter;
++	dbus_signature_iter_init(&iter, signature);
++	do {
++		// Bail out if the signature contains a non-basic type.
++		int type = dbus_signature_iter_get_current_type(&iter);
++		if (!dbus_type_is_basic(type)) {
++			return -EINVAL;
++		}
++
++		// Bail out if signature does not match the actual argument.
++		if (dbus_message_iter_get_arg_type(msg->iter) != type) {
++			return -ENXIO;
++		}
++
++		// Don't check for "no more args" condition here, since it is possible
++		// that there are no more elements in the signature either. The erronous
++		// "signature not ended, but no more args" scenario is dealt with at the
++		// beginning of the loop body by DBUS_TYPE_INVALID not being a basic
++		// type.
++		dbus_message_iter_next(msg->iter);
++	} while (dbus_signature_iter_next(&iter));
++
++	return dbus_message_iter_has_next(msg->iter);
++}
++
++int sd_bus_message_enter_container(sd_bus_message *msg, char type,
++		const char *signature) {
++	// Immediately return 0 if there are no arguments to read (or in this case,
++	// no container to enter), or -ENXIO if signature and actual argument type
++	// does not match.
++	int t = dbus_message_iter_get_arg_type(msg->iter);
++	if (t == DBUS_TYPE_INVALID) {
++		return 0;
++	} else if (t != type) {
++		return -ENXIO;
++	}
++
++	// Allocate an iterator, recurse into it, and set it as the current iterator
++	// of the message.
++	struct msg_iter *sub_iter = malloc(sizeof(struct msg_iter));
++	if (sub_iter == NULL) {
++		return -ENOMEM;
++	}
++
++	dbus_message_iter_recurse(msg->iter, &sub_iter->iter);
++	wl_list_insert(msg->iters, &sub_iter->link);
++	msg->iter = &sub_iter->iter;
++
++	return dbus_message_iter_has_next(&sub_iter->iter);
++}
++
++int sd_bus_message_exit_container(sd_bus_message *msg) {
++	// Remove the iterator we want to exit from from the iterator stack
++	struct msg_iter *iter = wl_container_of(msg->iters->next, iter, link);
++	wl_list_remove(&iter->link);
++
++	// Set msg's current iterator to the top of the iterator stack, and use
++	// dbus_message_iter_next to "step over" the iterator we are exiting.
++	iter = wl_container_of(msg->iters->next, iter, link);
++	msg->iter = &iter->iter;
++	dbus_message_iter_next(msg->iter);
++
++	return 0;
++}
++
++int sd_bus_emit_signal(sd_bus *bus, const char *path, const char *interface,
++		const char *name, const char *signature, ...) {
++	int ret = 0;
++	va_list ap;
++	va_start(ap, signature);
++
++	DBusMessage *signal = NULL;
++	if ((signal = dbus_message_new_signal(path, interface, name)) == NULL) {
++		ret = -ENOMEM;
++		goto finish;
++	}
++
++	DBusSignatureIter signature_iter;
++	DBusMessageIter message_iter;
++	dbus_signature_iter_init(&signature_iter, signature);
++	dbus_message_iter_init_append(signal, &message_iter);
++	do {
++		int type = dbus_signature_iter_get_current_type(&signature_iter);
++		if (!dbus_type_is_basic(type)) {
++			ret = -EINVAL;
++			goto finish;
++		}
++
++		DBusBasicValue val = va_arg(ap, DBusBasicValue);
++		if (!dbus_message_iter_append_basic(&message_iter, type, &val)) {
++			ret = -ENOMEM;
++			goto finish;
++		}
++	} while (dbus_signature_iter_next(&signature_iter));
++
++	if (!dbus_connection_send(bus, signal, NULL)) {
++		ret = -ENOMEM;
++		goto finish;
++	}
++
++finish:
++	va_end(ap);
++	dbus_message_unref(signal);
++	return ret;
++}
++
++int sd_bus_reply_method_return(sd_bus_message *msg, const char *signature, ...) {
++	int ret = 0;
++	va_list ap;
++	va_start(ap, signature);
++
++	DBusMessage *reply = NULL;
++	if ((reply = dbus_message_new_method_return(msg->message)) == NULL) {
++		ret = -ENOMEM;
++		goto finish;
++	}
++
++	if (strlen(signature) == 0) {
++		goto send;
++	}
++
++	DBusSignatureIter signature_iter;
++	DBusMessageIter message_iter;
++	dbus_signature_iter_init(&signature_iter, signature);
++	dbus_message_iter_init_append(reply, &message_iter);
++	do {
++		int type = dbus_signature_iter_get_current_type(&signature_iter);
++		if (!dbus_type_is_basic(type)) {
++			ret = -EINVAL;
++			goto finish;
++		}
++
++		DBusBasicValue val = va_arg(ap, DBusBasicValue);
++		if (!dbus_message_iter_append_basic(&message_iter, type, &val)) {
++			ret = -ENOMEM;
++			goto finish;
++		}
++	} while (dbus_signature_iter_next(&signature_iter));
++
++send:
++	if (!dbus_connection_send(msg->bus, reply, NULL)) {
++		ret = -ENOMEM;
++		goto finish;
++	}
++
++finish:
++	va_end(ap);
++	dbus_message_unref(reply);
++	return ret;
++}
++
++int sd_bus_send(sd_bus *bus, sd_bus_message *msg, dbus_uint32_t *cookie) {
++	// NOTE: The original sd_bus_send takes an uint64_t * as the third parameter.
++	// We take a dbus_uint32_t *, because dbus_connection_send uses it.
++
++	sd_bus *conn = (bus == NULL ? msg->bus : bus);
++	if (!dbus_connection_send(conn, msg->message, cookie)) {
++		return -ENOMEM;
++	}
++
++	return 0;
++}
+diff --git a/dbus/subd-vtable.c b/dbus/subd-vtable.c
+new file mode 100644
+index 0000000..91b7c0e
+--- /dev/null
++++ b/dbus/subd-vtable.c
+@@ -0,0 +1,337 @@
++#include <errno.h>
++#include <stdbool.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include "subd.h"
++
++struct vtable_userdata {
++	struct wl_list *interfaces;
++	void *userdata;
++};
++
++struct interface {
++	const char *name;
++	const struct subd_member *members;
++	struct wl_list link;
++};
++
++struct path {
++	const char *path;
++	char *introspection_data;
++	struct wl_list *interfaces;
++	struct wl_list link;
++};
++
++static struct wl_list *paths = NULL;
++
++static bool add_args(FILE *stream, const char *sig, const char *end) {
++	DBusSignatureIter iter;
++	if (!dbus_signature_validate(sig, NULL)) {
++		return false;
++	}
++
++	if (strlen(sig) > 0) {
++		dbus_signature_iter_init(&iter, sig);
++		do {
++			char *s = dbus_signature_iter_get_signature(&iter);
++			fprintf(stream, "   <arg type=\"%s\" %s />\n", s, end);
++			dbus_free(s);
++		} while (dbus_signature_iter_next(&iter));
++	}
++
++	return true;
++}
++
++static const char *generate_introspection_data(struct path *path) {
++	free(path->introspection_data);
++
++	size_t size;
++	FILE *stream = open_memstream(&path->introspection_data, &size);
++	if (stream == NULL) {
++		return NULL;
++	}
++
++	// Write the DOCTYPE entity, and start the <node> element.
++	fputs(DBUS_INTROSPECT_1_0_XML_DOCTYPE_DECL_NODE, stream);
++	fputs("<node>\n", stream);
++
++	// Iterate through the path's interfaces, ...
++	struct interface *interface;
++	wl_list_for_each(interface, path->interfaces, link) {
++		fprintf(stream, " <interface name=\"%s\">\n", interface->name);
++
++		const struct subd_member *member = interface->members;
++		while (member->type != SUBD_MEMBERS_END) {
++			switch (member->type) {
++			case SUBD_METHOD:
++				fprintf(stream, "  <method name=\"%s\">\n", member->m.name);
++				add_args(stream, member->m.input_signature, "direction=\"in\"");
++				add_args(stream, member->m.output_signature, "direction=\"out\"");
++				fprintf(stream, "  </method>\n");
++				break;
++			case SUBD_SIGNAL:
++				fprintf(stream, "  <signal name=\"%s\">\n", member->s.name);
++				add_args(stream, member->s.signature, "");
++				fprintf(stream, "  </signal>\n");
++				break;
++			case SUBD_PROPERTY:
++				fprintf(stream, "  <property name=\"%s\" type=\"%s\" ",
++					member->p.name, member->p.signature);
++				switch (member->p.access) {
++				case SUBD_PROPERTY_READ:
++					fprintf(stream, "\"read\" />\n");
++					break;
++				case SUBD_PROPERTY_WRITE:
++					fprintf(stream, "\"write\" />\n");
++					break;
++				case SUBD_PROPERTY_READWRITE:
++					fprintf(stream, "\"readwrite\" />\n");
++					break;
++				}
++				break;
++			case SUBD_MEMBERS_END:
++				// not gonna happen
++				break;
++			}
++			member++;
++		}
++		fprintf(stream, " </interface>\n");
++	}
++	fprintf(stream, "</node>");
++	fclose(stream);
++
++	return path->introspection_data;
++}
++
++static int handle_introspect(sd_bus_message *msg, void *data, sd_bus_error *err) {
++	// Find the path the message was sent to, so we can access its list of
++	// implemented interfaces.
++	const char *path_name = dbus_message_get_path(msg->message);
++	struct path *p, *path = NULL;
++	wl_list_for_each(p, paths, link) {
++		if (strcmp(p->path, path_name) == 0) {
++			path = p;
++			break;
++		}
++	}
++
++	if (path == NULL) {
++		// Something is seriously weird here. Path was not found, but then how
++		// was the method handler called??
++		dbus_set_error(err, DBUS_ERROR_INVALID_ARGS,
++			"Path was not found in paths list.");
++		return -EINVAL;
++	}
++
++	if (path->introspection_data == NULL) {
++		// This shouldn't really happen, introspection data is generated when
++		// the vtable is registered.
++		if (generate_introspection_data(path) == NULL) {
++			dbus_set_error(err, DBUS_ERROR_NO_MEMORY,
++				"Introspection data could not be generated.");
++			return -ENOMEM;
++		}
++	}
++
++	return sd_bus_reply_method_return(msg, "s", path->introspection_data);
++}
++
++static const struct subd_member introspectable_members[] = {
++	{SUBD_METHOD, .m = {"Introspect", handle_introspect, "", "s"}},
++	{SUBD_MEMBERS_END, .e=0},
++};
++
++/**
++ * Helper function for vtable_dispatch that returns wither NULL, or the method
++ * object member with the name "name".
++ */
++static const struct subd_member *find_member(const struct subd_member *members,
++		const char *name) {
++	const struct subd_member *member = members;
++	while (member->type != SUBD_MEMBERS_END) {
++		if (member->type == SUBD_METHOD && strcmp(member->m.name, name) == 0) {
++			return member;
++		}
++		++member;
++	}
++	return NULL;
++}
++
++/**
++ * Helper function for vtable_dispatch that calls the method object member's
++ * handler function, and sends an error message if necessary.
++ */
++static bool call_method(const struct subd_member *member, DBusConnection *conn,
++		DBusMessage *msg, void *userdata) {
++	sd_bus_message *message = NULL;
++	message = malloc(sizeof(sd_bus_message));
++	if (message == NULL) {
++		return false;
++	}
++	message->bus = conn;
++	message->message = msg;
++	message->ref_count = 1;
++	message->iters = malloc(sizeof(struct wl_list));
++	if (message->iters == NULL) {
++		return false;
++	}
++	wl_list_init(message->iters);
++
++	struct msg_iter *iter = malloc(sizeof(struct msg_iter));
++	if (iter == NULL) {
++		return false;
++	}
++	dbus_message_iter_init(message->message, &iter->iter);
++	wl_list_insert(message->iters, &iter->link);
++	message->iter = &iter->iter;
++
++	DBusError error;
++	dbus_error_init(&error);
++	if (member->m.handler(message, userdata, &error) < 0) {
++		//XXX: handle error == NULL
++		DBusMessage *error_message =
++			dbus_message_new_error(msg, error.name, error.message);
++		dbus_connection_send(conn, error_message, 0);
++		dbus_error_free(&error);
++		return false;
++	}
++	return true;
++}
++
++/**
++ * This function receives a list of interfaces implemented by the destination
++ * object in "userdata->interfaces", and iterates through them and their members
++ * to find the called method. When the method is found, its handler function is
++ * called with "data" set to "userdata->userdata".
++ */
++static DBusHandlerResult vtable_dispatch(DBusConnection *connection,
++		DBusMessage *message, void *userdata) {
++	struct vtable_userdata *data = userdata;
++	const char *interface_name = dbus_message_get_interface(message);
++	const char *member_name = dbus_message_get_member(message);
++	if (interface_name == NULL || member_name == NULL) {
++		// something is wrong, no need to try with other handlers
++		return DBUS_HANDLER_RESULT_HANDLED;
++	}
++
++	struct interface *interface;
++	wl_list_for_each(interface, data->interfaces, link) {
++		if (strcmp(interface->name, interface_name) == 0) {
++			const struct subd_member *member =
++				find_member(interface->members, member_name);
++			if (member != NULL) {
++				call_method(member, connection, message, data->userdata);
++				return DBUS_HANDLER_RESULT_HANDLED;
++			}
++		}
++	}
++
++	return DBUS_HANDLER_RESULT_NOT_YET_HANDLED;
++}
++
++static const DBusObjectPathVTable dbus_vtable = {
++	.message_function = vtable_dispatch,
++	.unregister_function = NULL,
++};
++
++int sd_bus_add_object_vtable(sd_bus *bus, sd_bus_slot **slot,
++		const char *path_name, const char *interface,
++		const sd_bus_vtable *vtable, void *userdata) {
++	int ret = 0;
++
++	if (paths == NULL) {
++		paths = malloc(sizeof(struct path));
++		if (paths == NULL) {
++			return -ENOMEM;
++		}
++		wl_list_init(paths);
++	}
++
++	// See if this path is already registered. If it is, it must have at least
++	// one interface, so get a pointer to the interfaces list.
++	struct wl_list *interfaces = NULL;
++	struct path *p, *path = NULL;
++	wl_list_for_each(p, paths, link) {
++		if (strcmp(path_name, p->path) == 0) {
++			path = p;
++			interfaces = p->interfaces;
++			break;
++		}
++	}
++
++	if (interfaces == NULL) {
++		// Path was not registered before, so first we create an interface list,
++		// and append Introspectable to it. We want every path to implement
++		// org.freedesktop.DBus.Introspectable.
++		// TODO: Also implement the following:
++		//        - org.freedesktop.DBus.Peer
++		//        - org.freedesktop.DBus.Properties
++		interfaces = malloc(sizeof(struct wl_list));
++		if (interfaces == NULL) {
++			ret = -ENOMEM;
++			goto finish;
++		}
++		wl_list_init(interfaces);
++		struct interface *new_interface = malloc(sizeof(struct interface));
++		if (interface == NULL) {
++			ret = -ENOMEM;
++			goto finish;
++		}
++		new_interface->name = strdup("org.freedesktop.DBus.Introspectable");
++		new_interface->members = introspectable_members;
++		wl_list_insert(interfaces, &new_interface->link);
++
++		// Create the path with the new interface list
++		struct path *new_path = malloc(sizeof(struct path));
++		if (new_path == NULL) {
++			ret = -ENOMEM;
++			goto finish;
++		}
++		new_path->path = strdup(path_name);
++		new_path->interfaces = interfaces;
++		new_path->introspection_data = NULL; // This will be set later.
++		path = new_path;
++
++		// ... and also register it.
++		// We merge userdata with the interfaces list in a struct
++		// vtable_userdata here, so vtable_dispatch will know what interfaces to
++		// traverse, and what userdata to pass to the actual handler functions.
++		struct vtable_userdata *data = malloc(sizeof(struct vtable_userdata));
++		if (data == NULL) {
++			free(new_path);
++			ret = -ENOMEM;
++			goto finish;
++		}
++		data->interfaces = interfaces;
++		data->userdata = userdata;
++		if (!dbus_connection_try_register_object_path(bus, path_name,
++				&dbus_vtable, data, NULL)) {
++			free(new_path);
++			ret = -ENXIO;
++			goto finish;
++		}
++	}
++
++	//TODO: Decide what to do if interface is already registered. Replace
++	//memeber list? Append new members to list? Throw an error?
++
++	// Append the new interface to the path's interface list.
++	struct interface *new_interface = malloc(sizeof(struct interface));
++	if (new_interface == NULL) {
++		ret = -ENOMEM;
++		goto finish;
++	}
++	new_interface->name = strdup(interface);
++	new_interface->members = vtable;
++	wl_list_insert(interfaces, &new_interface->link);
++
++	// Append the path to the list of paths
++	wl_list_insert(paths, &path->link);
++
++	// (Re)generate introspection XML for this path.
++	generate_introspection_data(path);
++
++finish:
++	return ret;
++}
+diff --git a/dbus/subd-watch.c b/dbus/subd-watch.c
+new file mode 100644
+index 0000000..ef913e7
+--- /dev/null
++++ b/dbus/subd-watch.c
+@@ -0,0 +1,180 @@
++#include <errno.h>
++#include <poll.h>
++#include <semaphore.h>
++#include <stdlib.h>
++#include <string.h>
++#include "subd.h"
++
++static dbus_bool_t add_watch(DBusWatch *watch, void *data) {
++	struct subd_watches *watches = data;
++	sem_wait(&watches->mutex);
++
++	if (!dbus_watch_get_enabled(watch)) {
++		sem_post(&watches->mutex);
++		return TRUE;
++	}
++
++	if (watches->length == watches->capacity) {
++		int c = watches->capacity + 10;
++		void *t1 = realloc(watches->fds, sizeof(struct pollfd) * c);
++		void *t2 = realloc(watches->watches, sizeof(DBusWatch *) * c);
++		if (t1 == NULL || t2 == NULL) {
++			sem_post(&watches->mutex);
++			return FALSE;
++		} else {
++			watches->capacity = c;
++		}
++	}
++
++	short mask = 0;
++	unsigned int flags = dbus_watch_get_flags(watch);
++	if (flags & DBUS_WATCH_READABLE) {
++		mask |= POLLIN;
++	}
++	if (flags & DBUS_WATCH_WRITABLE) {
++		mask |= POLLOUT;
++	}
++
++	int fd = dbus_watch_get_unix_fd(watch);
++	struct pollfd pollfd = {fd, mask, 0};
++	int index = watches->length++;
++	watches->fds[index] = pollfd;
++	watches->watches[index] = watch;
++
++	sem_post(&watches->mutex);
++	return TRUE;
++}
++
++static void remove_watch(DBusWatch *watch, void *data) {
++	struct subd_watches *watches = data;
++	sem_wait(&watches->mutex);
++
++	int index = -1;
++	for (int i = 0; i < watches->length; ++i) {
++		if (watches->watches[i] == watch) {
++			index = i;
++			break;
++		}
++	}
++
++	if (index != -1) {
++		--watches->length;
++		memmove(&watches->fds[index], &watches->fds[index + 1],
++			sizeof(struct pollfd) * watches->length - index);
++		memmove(&watches->watches[index], &watches->watches[index + 1],
++			sizeof(DBusWatch *) * watches->length - index);
++	}
++
++	sem_post(&watches->mutex);
++}
++
++static void toggle_watch(DBusWatch *watch, void *data) {
++	if (dbus_watch_get_enabled(watch)) {
++		add_watch(watch, data);
++	} else {
++		remove_watch(watch, data);
++	}
++}
++
++struct subd_watches *subd_init_watches(struct DBusConnection *connection,
++		struct pollfd *fds, int size, DBusError *error) {
++	const char *error_code = NULL;
++
++	// Initialize the watches structure.
++	struct subd_watches *watches = malloc(sizeof(struct subd_watches));
++	if (watches == NULL) {
++		error_code = DBUS_ERROR_NO_MEMORY;
++		goto error;
++	}
++
++	watches->capacity = 10 + size;
++	watches->length = size;
++	watches->fds = malloc(watches->capacity * sizeof(struct pollfd));
++	watches->watches = malloc(watches->capacity * sizeof(DBusWatch*));
++	if (watches->fds == NULL || watches->watches == NULL) {
++		error_code = DBUS_ERROR_NO_MEMORY;
++		goto error;
++	}
++
++	// Initialize a semaphore for the watches. It is needed to prevent the add,
++	// remove and toggle functions accessing the watch storage while it is being
++	// processed by subd_process_watches.
++	if (sem_init(&watches->mutex, 0, 1) == -1) {
++		if (errno == EINVAL) {
++			error_code = DBUS_ERROR_INVALID_ARGS;
++		} else {
++			error_code = DBUS_ERROR_NO_MEMORY;
++		}
++		goto error;
++	}
++
++	// Add any non-dbus file descriptors.
++	for (int i = 0; i < size; ++i) {
++		watches->fds[i] = (struct pollfd){
++			.fd = fds->fd,
++			.events = fds->events
++		};
++		watches->watches[i] = NULL;
++		++fds;
++	}
++
++	// Register the add, remove, and toggle functions.
++	// NOTE: Can't use the free_data_function argument to automatically free
++	// watches when connection finalizes, because sometimes it does not work.
++	if (!dbus_connection_set_watch_functions(connection, add_watch,
++			remove_watch, toggle_watch, watches, NULL)) {
++		error_code = DBUS_ERROR_NO_MEMORY;
++		goto error;
++	}
++
++	return watches;
++
++error:
++	if (watches != NULL) {
++		if (watches->fds != NULL) {
++			free(watches->fds);
++		}
++		if (watches->watches != NULL) {
++			free(watches->watches);
++		}
++	}
++	dbus_set_error(error, error_code, NULL);
++	return NULL;
++}
++
++void subd_process_watches(DBusConnection *conn, struct subd_watches *watches) {
++	sem_wait(&watches->mutex);
++
++	for (int i = 0; i < watches->length; ++i) {
++		struct pollfd pollfd = watches->fds[i];
++		DBusWatch *watch = watches->watches[i];
++
++		if (watch == NULL || !dbus_watch_get_enabled(watch)) {
++			continue;
++		}
++
++		if (pollfd.revents & pollfd.events) {
++			unsigned int flags = 0;
++			if (pollfd.revents & POLLIN) {
++				flags |= DBUS_WATCH_READABLE;
++			}
++			if (pollfd.revents & POLLOUT) {
++				flags |= DBUS_WATCH_WRITABLE;
++			}
++			if (pollfd.revents & POLLHUP) {
++				flags |= DBUS_WATCH_HANGUP;
++			}
++			if (pollfd.revents & POLLERR) {
++				flags |= DBUS_WATCH_ERROR;
++			}
++
++			//TODO: Error handling. Not sure, what is the right move here. Log
++			//      and ignore? Make them fatal?
++			dbus_watch_handle(watch, flags);
++			while (dbus_connection_dispatch(conn) ==
++					DBUS_DISPATCH_DATA_REMAINS);
++		}
++	}
++
++	sem_post(&watches->mutex);
++}
+diff --git a/include/subd-sdbus.h b/include/subd-sdbus.h
+new file mode 100644
+index 0000000..8d77600
+--- /dev/null
++++ b/include/subd-sdbus.h
+@@ -0,0 +1,142 @@
++#ifndef _SUBD_SDBUS_H
++#define _SUBD_SDBUS_H
++
++#include <dbus/dbus.h>
++#include <wayland-util.h>
++
++#define SD_BUS_NAME_ALLOW_REPLACEMENT DBUS_NAME_FLAG_ALLOW_REPLACEMENT
++#define SD_BUS_NAME_REPLACE_EXISTING DBUS_NAME_FLAG_REPLACE_EXISTING
++#define SD_BUS_NAME_QUEUE ~DBUS_NAME_FLAG_DO_NOT_QUEUE
++
++/**
++ * These types are the rough equivalents of each other in libdbus and sd-bus.
++ * They are opaque structures in both library, so we can just typedef them to
++ * make our life easier.
++ */
++typedef struct DBusConnection sd_bus;
++typedef struct DBusError sd_bus_error;
++typedef struct subd_member sd_bus_vtable;
++
++/**
++ * his is not used, but typedef-d to preserve sd-bus function signatures.
++ */
++typedef int sd_bus_slot;
++
++/**
++ * In sd-bus, sd_bus_message knows what sd_bus it is associated with, and also
++ * keeps track of its current read/write position. This can be achieved with
++ * libdbus by encapsulating the DBusConnection (sd_bus), the DBusMessage, and a
++ * stack of iterators (implemented here as a wl_list of msg_iter structs) in one
++ * structure. The current DBusMessageIter (iter) is also stored to make
++ * accessing it easier (i.e. it's just syntactic sugar).
++ */
++struct msg_iter {
++	DBusMessageIter iter;
++	struct wl_list link;
++};
++
++typedef struct sd_bus_message {
++	sd_bus *bus;
++	DBusMessage *message;
++	DBusMessageIter *iter;
++	struct wl_list *iters;
++	int ref_count;
++} sd_bus_message;
++
++/**
++ * The following two enums and one struct are pulled straight from subd, and are
++ * used by the handler dispatcher logic, and the automatic Introspectable
++ * intarface implementation.
++ *
++ * TODO: These could be changed to behave the same as sd-bus vtables, which
++ * would eliminate the need of #ifdef-d vtable definitions in dbus/xdg.c and
++ * dbus/mako.c.
++ */
++
++/**
++ * Represents the three DBus member types.
++ */
++enum subd_member_type {
++	SUBD_METHOD,
++	SUBD_SIGNAL,
++	SUBD_PROPERTY,
++	SUBD_MEMBERS_END,
++};
++
++/**
++ * Represents the three possible access types for DBus properties.
++ */
++enum subd_property_access {
++	SUBD_PROPERTY_READ,
++	SUBD_PROPERTY_WRITE,
++	SUBD_PROPERTY_READWRITE,
++};
++
++/**
++ * This struct represents a DBus object member, and serves two purpose:
++ *
++ *  - If the member is a method, it has a pointer to the method's handler
++ *    function, so that the vtable dispatcher knows where to dispatch execution.
++ *  - It has the metadata for the member (name, output and/or input signatures,
++ *    access) that introspection data can be built from.
++ */
++struct subd_member {
++	enum subd_member_type type;
++	union {
++		struct {
++			const char *name;
++			int (*handler)(sd_bus_message *, void *, sd_bus_error *);
++			const char *input_signature;
++			const char *output_signature;
++		} m;
++		struct {
++			const char *name;
++			const char *signature;
++		} s;
++		struct {
++			const char *name;
++			const char *signature;
++			enum subd_property_access access;
++		} p;
++		int e;
++	};
++};
++
++/**
++ * The following functions are wrappers around the libdbus library that mimic
++ * their sd-bus equivalents. These are not necessarily 1:1 matches of the
++ * originals, only the functionality needed for mako is implemented here.
++ * Most notable difference is that functions that read or write messages are
++ * only able to deal with basic types.
++ */
++
++int sd_bus_open_user(sd_bus **bus);
++int sd_bus_request_name(sd_bus *bus, const char *name, int flags);
++void sd_bus_slot_unref(int *slot);
++void sd_bus_flush_close_unref(sd_bus *bus);
++
++void sd_bus_error_set_const(sd_bus_error *err, const char *name, const char *msg);
++
++int sd_bus_message_new_method_return(sd_bus_message *msg, sd_bus_message **newmsg);
++int sd_bus_message_open_container(sd_bus_message *msg, char type,
++	const char *signature);
++int sd_bus_message_append(sd_bus_message *msg, const char *signature, ...);
++int sd_bus_message_close_container(sd_bus_message *msg);
++int sd_bus_message_peek_type(sd_bus_message *msg, void *unused,
++	const char **signature);
++int sd_bus_message_read(sd_bus_message *msg, const char *signature, ...);
++int sd_bus_message_enter_container(sd_bus_message *msg, char type,
++	const char *signature);
++int sd_bus_message_exit_container(sd_bus_message *msg);
++int sd_bus_message_skip(sd_bus_message *msg, const char *signature);
++void sd_bus_message_unref(sd_bus_message *msg);
++
++int sd_bus_emit_signal(sd_bus *bus, const char *path, const char *interface,
++	const char *name, const char *signature, ...);
++int sd_bus_reply_method_return(sd_bus_message *msg, const char *signature, ...);
++int sd_bus_send(sd_bus *bus, sd_bus_message *msg, dbus_uint32_t *cookie);
++
++int sd_bus_add_object_vtable(sd_bus *bus, sd_bus_slot **slot, const char *path_name,
++	const char *interface, const sd_bus_vtable *vtable, void *data);
++
++#endif
+diff --git a/include/subd.h b/include/subd.h
+new file mode 100644
+index 0000000..33c997b
+--- /dev/null
++++ b/include/subd.h
+@@ -0,0 +1,41 @@
++#ifndef _SUBD_H
++#define _SUBD_H
++
++#include <semaphore.h>
++#include "subd-sdbus.h"
++
++struct pollfd;
++
++/**
++ * This struct stores the DBus watches, and their corresponging file
++ * descriptors. This will be auto-updated whenever DBus needs additional file
++ * descriptors to watch. You can also store other, not DBus-related file
++ * descriptors here, so you can directly use fds as a parameter for poll().
++ * If you add non-watch file descriptors, make sure to set their corresponding
++ * watch to NULL, so that #subd_process_watches knows to skip them.
++ */
++struct subd_watches {
++	struct pollfd *fds;
++	DBusWatch **watches;
++	int capacity;	
++	int length;
++	sem_t mutex;
++};
++
++/**
++ * This function creates a subd_watches instance, and pre-populates it with
++ * the non-DBus file descriptors passed as fds. It also registers the add,
++ * remove and toggle functions that will handle automatic file descriptor
++ * additions/removals.
++ */
++struct subd_watches *subd_init_watches(DBusConnection *conn, struct pollfd *fds,
++	int size, DBusError *error);
++
++/**
++ * This function should be called from the event loop after a successful poll to
++ * handle the DBus watches that need to be handled (= the watches whose file
++ * descriptor returned an event).
++ */
++void subd_process_watches(DBusConnection *conn, struct subd_watches *watches);
++
++#endif
+-- 
+2.27.0
+
+
+From 36204562daddd02b9badb02a456d140ab85555a2 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Fri, 26 Oct 2018 15:52:04 +0200
+Subject: [PATCH 02/18] Add conditionally compiled code pieces for subd
+
+This commit adds necessary modifications to the original Mako code, and
+puts them behind preprocessor conditions defined by the build system.
+---
+ dbus/mako.c          | 10 ++++++++
+ dbus/xdg.c           | 12 ++++++++++
+ event-loop.c         | 54 ++++++++++++++++++++++++++++++++++++++++++++
+ include/dbus.h       |  2 ++
+ include/event-loop.h |  9 ++++++++
+ include/mako.h       |  2 ++
+ 6 files changed, 89 insertions(+)
+
+diff --git a/dbus/mako.c b/dbus/mako.c
+index bf64995..4946550 100644
+--- a/dbus/mako.c
++++ b/dbus/mako.c
+@@ -230,6 +230,7 @@ static int handle_reload(sd_bus_message *msg, void *data,
+ 	return sd_bus_reply_method_return(msg, "");
+ }
+ 
++#if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
+ static const sd_bus_vtable service_vtable[] = {
+ 	SD_BUS_VTABLE_START(0),
+ 	SD_BUS_METHOD("DismissAllNotifications", "", "", handle_dismiss_all_notifications, SD_BUS_VTABLE_UNPRIVILEGED),
+@@ -239,6 +240,15 @@ static const sd_bus_vtable service_vtable[] = {
+ 	SD_BUS_METHOD("Reload", "", "", handle_reload, SD_BUS_VTABLE_UNPRIVILEGED),
+ 	SD_BUS_VTABLE_END
+ };
++#else
++static const struct subd_member service_vtable[] = {
++	{SUBD_METHOD, .m = {"DismissAllNotifications", handle_dismiss_all_notifications, "", ""}},
++	{SUBD_METHOD, .m = {"DismissLastNotification", handle_dismiss_last_notification, "", ""}},
++	{SUBD_METHOD, .m = {"InvokeAction", handle_invoke_action, "s", ""}},
++	{SUBD_METHOD, .m = {"Reload", handle_reload, "", ""}},
++	{SUBD_MEMBERS_END, .e=0},
++};
++#endif
+ 
+ int init_dbus_mako(struct mako_state *state) {
+ 	return sd_bus_add_object_vtable(state->bus, &state->mako_slot, service_path,
+diff --git a/dbus/xdg.c b/dbus/xdg.c
+index 81e115d..4bfcfb0 100644
+--- a/dbus/xdg.c
++++ b/dbus/xdg.c
+@@ -436,6 +436,7 @@ static int handle_get_server_information(sd_bus_message *msg, void *data,
+ 		spec_version);
+ }
+ 
++#if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
+ static const sd_bus_vtable service_vtable[] = {
+ 	SD_BUS_VTABLE_START(0),
+ 	SD_BUS_METHOD("GetCapabilities", "", "as", handle_get_capabilities, SD_BUS_VTABLE_UNPRIVILEGED),
+@@ -446,6 +447,17 @@ static const sd_bus_vtable service_vtable[] = {
+ 	SD_BUS_SIGNAL("NotificationClosed", "uu", 0),
+ 	SD_BUS_VTABLE_END
+ };
++#else
++static const struct subd_member service_vtable[] = {
++	{SUBD_METHOD, .m = {"GetCapabilities", handle_get_capabilities, "", "as"}},
++	{SUBD_METHOD, .m = {"Notify", handle_notify, "susssasa{sv}i", "u"}},
++	{SUBD_METHOD, .m = {"CloseNotification", handle_close_notification, "u", ""}},
++	{SUBD_METHOD, .m = {"GetServerInformation", handle_get_server_information, "", "ssss"}},
++	{SUBD_SIGNAL, .s = {"ActionInvoked", "us"}},
++	{SUBD_SIGNAL, .s = {"NotificationClosed", "uu"}},
++	{SUBD_MEMBERS_END, .e=0},
++};
++#endif
+ 
+ int init_dbus_xdg(struct mako_state *state) {
+ 	return sd_bus_add_object_vtable(state->bus, &state->xdg_slot, service_path,
+diff --git a/event-loop.c b/event-loop.c
+index 222a8bc..0bb167f 100644
+--- a/event-loop.c
++++ b/event-loop.c
+@@ -33,6 +33,7 @@ static int init_signalfd() {
+ 	return sfd;
+ }
+ 
++#if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
+ bool init_event_loop(struct mako_event_loop *loop, sd_bus *bus,
+ 		struct wl_display *display) {
+ 	if ((loop->sfd = init_signalfd()) == -1) {
+@@ -65,6 +66,47 @@ bool init_event_loop(struct mako_event_loop *loop, sd_bus *bus,
+ 
+ 	return true;
+ }
++#else
++bool init_event_loop(struct mako_event_loop *loop, sd_bus *bus,
++		struct wl_display *display) {
++	if ((loop->sfd = init_signalfd()) == -1) {
++		return false;
++	}
++
++	struct pollfd pollfds[MAKO_EVENT_COUNT];
++
++	pollfds[MAKO_EVENT_SIGNAL] = (struct pollfd){
++		.fd = loop->sfd;
++		.events = POLLIN,
++	};
++
++	pollfds[MAKO_EVENT_WAYLAND] = (struct pollfd){
++		.fd = wl_display_get_fd(display),
++		.events = POLLIN,
++	};
++
++	pollfds[MAKO_EVENT_TIMER] = (struct pollfd){
++		.fd = timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC),
++		.events = POLLIN,
++	};
++
++	DBusError error;
++	dbus_error_init(&error);
++	loop->watches = subd_init_watches(connection, pollfds, MAKO_EVENT_COUNT,
++		&error);
++	if (loop->watches == NULL) {
++		fprintf(stderr, "failed to initialize loop: %s\n", error.message);
++		return false;
++	}
++
++	loop->fds = loop->watches->fds;
++	loop->bus = connection;
++	loop->display = display;
++	wl_list_init(&loop->timers);
++
++	return true;
++}
++#endif
+ 
+ void finish_event_loop(struct mako_event_loop *loop) {
+ 	close(loop->fds[MAKO_EVENT_TIMER].fd);
+@@ -76,6 +118,14 @@ void finish_event_loop(struct mako_event_loop *loop) {
+ 	}
+ }
+ 
++static int poll_event_loop(struct mako_event_loop *loop) {
++#if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
++	return poll(loop->fds, MAKO_EVENT_COUNT, -1);
++#else
++	return poll(loop->fds, loop->watches->length, -1);
++#endif
++}
++
+ static void timespec_add(struct timespec *t, int delta_ms) {
+ 	static const long ms = 1000000, s = 1000000000;
+ 
+@@ -216,6 +266,7 @@ int run_event_loop(struct mako_event_loop *loop) {
+ 			break;
+ 		}
+ 
++#if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
+ 		if (loop->fds[MAKO_EVENT_DBUS].revents & POLLIN) {
+ 			do {
+ 				ret = sd_bus_process(loop->bus, NULL);
+@@ -235,6 +286,9 @@ int run_event_loop(struct mako_event_loop *loop) {
+ 				break;
+ 			}
+ 		}
++#else
++		subd_process_watches(loop->bus, loop->watches);
++#endif
+ 
+ 		if (loop->fds[MAKO_EVENT_WAYLAND].revents & POLLIN) {
+ 			ret = wl_display_dispatch(loop->display);
+diff --git a/include/dbus.h b/include/dbus.h
+index 1c4e6f3..0be4d38 100644
+--- a/include/dbus.h
++++ b/include/dbus.h
+@@ -6,6 +6,8 @@
+ #include <systemd/sd-bus.h>
+ #elif HAVE_ELOGIND
+ #include <elogind/sd-bus.h>
++#elif HAVE_SUBD
++#include "subd.h"
+ #endif
+ 
+ struct mako_state;
+diff --git a/include/event-loop.h b/include/event-loop.h
+index fc83384..4bd1e3b 100644
+--- a/include/event-loop.h
++++ b/include/event-loop.h
+@@ -9,10 +9,14 @@
+ #include <systemd/sd-bus.h>
+ #elif HAVE_ELOGIND
+ #include <elogind/sd-bus.h>
++#elif HAVE_SUBD
++#include "subd.h"
+ #endif
+ 
+ enum mako_event {
++#if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
+ 	MAKO_EVENT_DBUS,
++#endif
+ 	MAKO_EVENT_WAYLAND,
+ 	MAKO_EVENT_TIMER,
+ 	MAKO_EVENT_SIGNAL,
+@@ -20,7 +24,12 @@ enum mako_event {
+ };
+ 
+ struct mako_event_loop {
++#if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
+ 	struct pollfd fds[MAKO_EVENT_COUNT];
++#else
++	struct subd_watches *watches;
++	struct pollfd *fds;
++#endif
+ 	sd_bus *bus;
+ 	struct wl_display *display;
+ 	int sfd;
+diff --git a/include/mako.h b/include/mako.h
+index 4818d1b..534ecff 100644
+--- a/include/mako.h
++++ b/include/mako.h
+@@ -7,6 +7,8 @@
+ #include <systemd/sd-bus.h>
+ #elif HAVE_ELOGIND
+ #include <elogind/sd-bus.h>
++#elif HAVE_SUBD
++#include "subd.h"
+ #endif
+ 
+ #include "config.h"
+-- 
+2.27.0
+
+
+From dd26fda3a2e185197b5bc9d49d6aa588bfe008e8 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Fri, 26 Oct 2018 17:07:20 +0200
+Subject: [PATCH 03/18] Add dbus-1 as optional dependency
+
+This commit adds the dbus-1 library as a dependency if neither systemd,
+nor elogind is available. It also adds the sd-bus wrappers to the build
+system in such case.
+---
+ meson.build       | 56 +++++++++++++++++++++++++++++++++--------------
+ meson_options.txt |  2 ++
+ 2 files changed, 42 insertions(+), 16 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index 28fa8d8..9503e9d 100644
+--- a/meson.build
++++ b/meson.build
+@@ -35,23 +35,57 @@ if logind.found()
+ else
+ 	logind = dependency('libelogind')
+ 	add_project_arguments('-DHAVE_ELOGIND=1', language: 'c')
++sdbus = dependency(get_option('sdbus-provider'), required: get_option('sdbus'))
++dbus1 = dependency('dbus-1', required: not sdbus.found())
++wayland_client = dependency('wayland-client')
++wayland_protos = dependency('wayland-protocols', version: '>=1.14')
++
++mako_deps = []
++src_files = []
++
++if sdbus.found()
++	mako_deps += sdbus
++	add_project_arguments('-DHAVE_' + get_option('logind-provider').to_upper(), language: 'c')
++else
++	mako_deps += dbus1
++	src_files += [
++		'dbus/subd-vtable.c',
++		'dbus/subd-watch.c',
++		'dbus/subd-sdbus.c',
++	]
++	add_project_arguments('-DHAVE_SUBD', language: 'c')
+ endif
+ 
+ gdk_pixbuf = dependency('gdk-pixbuf-2.0', required: get_option('icons'))
+ if gdk_pixbuf.found()
+ 	add_global_arguments('-DHAVE_ICONS=1', language: 'c')
++	src_files += 'cairo-pixbuf.c'
+ endif
+ 
+ subdir('contrib/apparmor')
+ subdir('contrib/completions')
+ subdir('protocol')
+ 
+-src_files = [
++mako_deps += [
++	cairo,
++	client_protos,
++	gdk_pixbuf,
++	sdbus,
++	logind,
++	pango,
++	pangocairo,
++	glib,
++	gobject,
++	realtime,
++	wayland_client,
++]
++
++src_files += [
+ 	'config.c',
+-	'event-loop.c',
+ 	'dbus/dbus.c',
+ 	'dbus/mako.c',
+ 	'dbus/xdg.c',
++	'event-loop.c',
+ 	'main.c',
+ 	'notification.c',
+ 	'pool-buffer.c',
+@@ -63,25 +97,15 @@ src_files = [
+ 	'string-util.c',
+ ]
+ 
+-if gdk_pixbuf.found()
+-	src_files += 'cairo-pixbuf.c'
++# epoll is a separate library in FreeBSD
++if host_machine.system() == 'freebsd'
++	mako_deps += dependency('epoll-shim')
+ endif
+ 
+ executable(
+ 	'mako',
+ 	files(src_files),
+-	dependencies: [
+-		cairo,
+-		client_protos,
+-		gdk_pixbuf,
+-		logind,
+-		pango,
+-		pangocairo,
+-		glib,
+-		gobject,
+-		realtime,
+-		wayland_client,
+-	],
++	dependencies: mako_deps,
+ 	include_directories: [mako_inc],
+ 	install: true,
+ )
+diff --git a/meson_options.txt b/meson_options.txt
+index 8f51a95..5bf3c14 100644
+--- a/meson_options.txt
++++ b/meson_options.txt
+@@ -2,3 +2,5 @@ option('icons', type: 'feature', value: 'auto', description: 'Enable icon suppor
+ option('man-pages', type: 'feature', value: 'auto', description: 'Generate and install man pages')
+ option('zsh-completions', type: 'boolean', value: false, description: 'Install zsh completions')
+ option('apparmor', type: 'boolean', value: 'false', description: 'Install AppArmor profile')
++option('sdbus', type: 'feature', value: 'auto', description: 'Use sd-bus library')
++option('sdbus-provider', type: 'combo', choices: ['systemd', 'elogind'], value: 'systemd', description: 'Provider of sd-bus support library')
+-- 
+2.27.0
+
+
+From 3cf8ef8d9a032c4bdfddafe499accf5523346d5a Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Fri, 26 Oct 2018 17:18:01 +0200
+Subject: [PATCH 04/18] Fix some minor compile errors in event-loop.c
+
+---
+ event-loop.c | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/event-loop.c b/event-loop.c
+index 0bb167f..dccde67 100644
+--- a/event-loop.c
++++ b/event-loop.c
+@@ -3,6 +3,7 @@
+ #include <errno.h>
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #include <sys/timerfd.h>
+ #include <signal.h>
+ #include <sys/signalfd.h>
+@@ -76,7 +77,7 @@ bool init_event_loop(struct mako_event_loop *loop, sd_bus *bus,
+ 	struct pollfd pollfds[MAKO_EVENT_COUNT];
+ 
+ 	pollfds[MAKO_EVENT_SIGNAL] = (struct pollfd){
+-		.fd = loop->sfd;
++		.fd = loop->sfd,
+ 		.events = POLLIN,
+ 	};
+ 
+@@ -92,15 +93,14 @@ bool init_event_loop(struct mako_event_loop *loop, sd_bus *bus,
+ 
+ 	DBusError error;
+ 	dbus_error_init(&error);
+-	loop->watches = subd_init_watches(connection, pollfds, MAKO_EVENT_COUNT,
+-		&error);
++	loop->watches = subd_init_watches(bus, pollfds, MAKO_EVENT_COUNT, &error);
+ 	if (loop->watches == NULL) {
+ 		fprintf(stderr, "failed to initialize loop: %s\n", error.message);
+ 		return false;
+ 	}
+ 
+ 	loop->fds = loop->watches->fds;
+-	loop->bus = connection;
++	loop->bus = bus;
+ 	loop->display = display;
+ 	wl_list_init(&loop->timers);
+ 
+-- 
+2.27.0
+
+
+From cfac410f9665e17808327460acbf2ae7e9049c0c Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Fri, 26 Oct 2018 18:26:50 +0200
+Subject: [PATCH 05/18] Fix POSIX feature test macros
+
+This commit applies fixes for the following:
+pool-buffer.c: mkstemp is in POSIX.1-2008, thus requires _POSIX_C_SOURCE
+to be 200809L or higher, and _X_OPEN_SOURCE 500 does not provide that.
+event-loop.c: TFD_CLOEXEC is defined as O_CLOEXEC, which also appeared
+in POSIX.1-2008, thus _POSIX_C_SOURCE 199309L is not enough.
+---
+ event-loop.c  | 2 +-
+ pool-buffer.c | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/event-loop.c b/event-loop.c
+index dccde67..338d718 100644
+--- a/event-loop.c
++++ b/event-loop.c
+@@ -1,4 +1,4 @@
+-#define _POSIX_C_SOURCE 199309L
++#define _POSIX_C_SOURCE 200809L
+ #include <assert.h>
+ #include <errno.h>
+ #include <stdio.h>
+diff --git a/pool-buffer.c b/pool-buffer.c
+index 9652127..61f1e99 100644
+--- a/pool-buffer.c
++++ b/pool-buffer.c
+@@ -1,4 +1,4 @@
+-#define _POSIX_C_SOURCE 200112L
++#define _POSIX_C_SOURCE 200809L
+ #include <cairo/cairo.h>
+ #include <errno.h>
+ #include <fcntl.h>
+-- 
+2.27.0
+
+
+From af57a162bd904c7bb4138160759d96c882de3e89 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Fri, 26 Oct 2018 18:31:26 +0200
+Subject: [PATCH 06/18] Add a makoctl version that uses dbus-send
+
+busctl is part of sd-bus, so we don't have it when we are using subd.
+---
+ makoctl.libdbus | 52 +++++++++++++++++++++++++++++++++++++++++++++++++
+ meson.build     |  5 ++++-
+ 2 files changed, 56 insertions(+), 1 deletion(-)
+ create mode 100755 makoctl.libdbus
+
+diff --git a/makoctl.libdbus b/makoctl.libdbus
+new file mode 100755
+index 0000000..3d92d24
+--- /dev/null
++++ b/makoctl.libdbus
+@@ -0,0 +1,52 @@
++#!/bin/sh
++
++set -e
++
++usage() {
++	echo "Usage: makoctl <command> [options...]"
++	echo ""
++	echo "Commands:"
++	echo "  dismiss [-a|--all] Dismiss the last or all notifications"
++	echo "  invoke [action]    Invoke an action on the last notification"
++	echo "  reload             Reload the configuration file"
++	echo "  help               Show this help"
++}
++
++call() {
++	dbus-send --session --dest=org.freedesktop.Notifications /fr/emersion/Mako \
++		fr.emersion.Mako."$@"
++}
++
++case "$1" in
++"dismiss")
++	case "$2" in
++	"-a"|"--all")
++		call DismissAllNotifications
++		;;
++	"")
++		call DismissLastNotification
++		;;
++	*)
++		echo "makoctl: unrecognized option '$2'"
++		exit 1
++		;;
++	esac
++	;;
++"invoke")
++	action="$2"
++	if [ -z "$action" ] ; then
++		action="default"
++	fi
++	call InvokeAction "s" "$action"
++	;;
++"reload")
++	call Reload
++	;;
++"help"|"--help"|"-h")
++	usage
++	;;
++*)
++	echo "makoctl: unrecognized command '$1'"
++	exit 1
++	;;
++esac
+diff --git a/meson.build b/meson.build
+index 9503e9d..f23eff5 100644
+--- a/meson.build
++++ b/meson.build
+@@ -110,8 +110,11 @@ executable(
+ 	install: true,
+ )
+ 
++makoctl = sdbus.found() ? 'makoctl' : 'makoctl.libdbus'
++
+ install_data(
+-	'makoctl',
++	makoctl,
++	rename: 'makoctl',
+ 	install_dir: get_option('bindir'),
+ 	install_mode: 'rwxr-xr-x',
+ )
+-- 
+2.27.0
+
+
+From 0829888b9ea6783b703468116f44dcc01fc092c0 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Sun, 28 Oct 2018 19:46:43 +0100
+Subject: [PATCH 07/18] Avoid sending a non-set DBusError as reply
+
+---
+ dbus/subd-vtable.c | 11 ++++++-----
+ 1 file changed, 6 insertions(+), 5 deletions(-)
+
+diff --git a/dbus/subd-vtable.c b/dbus/subd-vtable.c
+index 91b7c0e..6eab057 100644
+--- a/dbus/subd-vtable.c
++++ b/dbus/subd-vtable.c
+@@ -189,11 +189,12 @@ static bool call_method(const struct subd_member *member, DBusConnection *conn,
+ 	DBusError error;
+ 	dbus_error_init(&error);
+ 	if (member->m.handler(message, userdata, &error) < 0) {
+-		//XXX: handle error == NULL
+-		DBusMessage *error_message =
+-			dbus_message_new_error(msg, error.name, error.message);
+-		dbus_connection_send(conn, error_message, 0);
+-		dbus_error_free(&error);
++		if (dbus_error_is_set(&error)) {
++			DBusMessage *error_message =
++				dbus_message_new_error(msg, error.name, error.message);
++			dbus_connection_send(conn, error_message, 0);
++			dbus_error_free(&error);
++		}
+ 		return false;
+ 	}
+ 	return true;
+-- 
+2.27.0
+
+
+From 38397c602bb09582f0439b9c24f318f8eff9b042 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Mon, 29 Oct 2018 09:52:58 +0100
+Subject: [PATCH 08/18] Free wl_list on error and message unref
+
+---
+ dbus/subd-sdbus.c | 17 ++++++++++++-----
+ 1 file changed, 12 insertions(+), 5 deletions(-)
+
+diff --git a/dbus/subd-sdbus.c b/dbus/subd-sdbus.c
+index eccdc14..3df1a0f 100644
+--- a/dbus/subd-sdbus.c
++++ b/dbus/subd-sdbus.c
+@@ -41,6 +41,8 @@ void sd_bus_error_set_const(sd_bus_error *err, const char *name, const char *msg
+ int sd_bus_message_new_method_return(sd_bus_message *msg, sd_bus_message **newmsg) {
+ 	sd_bus_message *new_message = NULL;
+ 	DBusMessage *message = NULL;
++	struct msg_iter *iter = NULL;
++
+ 	// Allocate a new "method return" DBusMessage
+ 	if ((message = dbus_message_new_method_return(msg->message)) == NULL) {
+ 		goto error;
+@@ -58,7 +60,7 @@ int sd_bus_message_new_method_return(sd_bus_message *msg, sd_bus_message **newms
+ 	new_message->message = message;
+ 	new_message->ref_count = 1;
+ 
+-	//Also initialize  the sd_bus_message's iterator stack, ...
++	//Also initialize the sd_bus_message's iterator stack, ...
+ 	new_message->iters = malloc(sizeof(struct wl_list));
+ 	if (new_message->iters == NULL) {
+ 		goto error;
+@@ -66,7 +68,7 @@ int sd_bus_message_new_method_return(sd_bus_message *msg, sd_bus_message **newms
+ 	wl_list_init(new_message->iters);
+ 
+ 	// ... and push a new append iterator to it.
+-	struct msg_iter *iter = malloc(sizeof(struct msg_iter));
++	iter = malloc(sizeof(struct msg_iter));
+ 	if (iter == NULL) {
+ 		goto error;
+ 	}
+@@ -78,7 +80,8 @@ int sd_bus_message_new_method_return(sd_bus_message *msg, sd_bus_message **newms
+ 	return 0;
+ 
+ error:
+-	//XXX list_destroy(new_message->iters);
++	free(iter);
++	free(new_message->iters);
+ 	free(new_message);
+ 	dbus_message_unref(message);
+ 	*newmsg = NULL;
+@@ -152,8 +155,12 @@ int sd_bus_message_append(sd_bus_message *msg, const char *signature, ...) {
+ 
+ void sd_bus_message_unref(sd_bus_message *msg) {
+ 	dbus_message_unref(msg->message);
+-	if (msg->ref_count == 0) {
+-		//XXX list_destroy(msg->iters);
++	if (--msg->ref_count == 0) {
++		struct msg_iter *iter, *itertmp = NULL;
++		wl_list_for_each_safe(iter, itertmp, msg->iters, link) {
++			free(iter);
++		}
++		free(msg->iters);
+ 		free(msg);
+ 	}
+ }
+-- 
+2.27.0
+
+
+From 0584201cc2bca3799865839b7af6310d826b7439 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Mon, 29 Oct 2018 09:59:47 +0100
+Subject: [PATCH 09/18] Remove TODO about dbus_watch_handle error handling
+
+A call to dbus_watch_handle fails if there is not enough memory. In such
+case, the "application may spin in a busy loop on the file descriptor
+until memory becomes available, but nothing more catastrophic should
+happen" (from libdbus documentation). I think this is better, than
+potentially blocking the handling of other fd events with a sleep.
+---
+ dbus/subd-watch.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/dbus/subd-watch.c b/dbus/subd-watch.c
+index ef913e7..5b6190e 100644
+--- a/dbus/subd-watch.c
++++ b/dbus/subd-watch.c
+@@ -168,9 +168,8 @@ void subd_process_watches(DBusConnection *conn, struct subd_watches *watches) {
+ 				flags |= DBUS_WATCH_ERROR;
+ 			}
+ 
+-			//TODO: Error handling. Not sure, what is the right move here. Log
+-			//      and ignore? Make them fatal?
+ 			dbus_watch_handle(watch, flags);
++
+ 			while (dbus_connection_dispatch(conn) ==
+ 					DBUS_DISPATCH_DATA_REMAINS);
+ 		}
+-- 
+2.27.0
+
+
+From db8869c2283d7b95be5cb4d28b2970db94d6ce51 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Mon, 29 Oct 2018 14:01:48 +0100
+Subject: [PATCH 10/18] Refactor sd_bus_add_object_vtable
+
+This function was too big, and also didn't do all the necessary resource
+deallocation in case of errors.
+---
+ dbus/subd-vtable.c   | 165 ++++++++++++++++++++++++-------------------
+ include/subd-sdbus.h |   2 +-
+ 2 files changed, 94 insertions(+), 73 deletions(-)
+
+diff --git a/dbus/subd-vtable.c b/dbus/subd-vtable.c
+index 6eab057..c2aed8d 100644
+--- a/dbus/subd-vtable.c
++++ b/dbus/subd-vtable.c
+@@ -236,10 +236,75 @@ static const DBusObjectPathVTable dbus_vtable = {
+ 	.unregister_function = NULL,
+ };
+ 
++static struct path *register_new_path(sd_bus * bus, const char *path_name,
++		void *userdata) {
++	struct wl_list *interfaces = NULL;
++	struct interface *new_interface = NULL;
++	struct path *new_path = NULL;
++	struct vtable_userdata *data = NULL;
++
++	// We create an interface list, and append Introspectable to it. We want
++	// every path to implement org.freedesktop.DBus.Introspectable.
++	// TODO: Also implement the following:
++	//        - org.freedesktop.DBus.Peer
++	//        - org.freedesktop.DBus.Properties
++	interfaces = malloc(sizeof(struct wl_list));
++	if (interfaces == NULL) {
++		goto error;
++	}
++	wl_list_init(interfaces);
++
++	new_interface = malloc(sizeof(struct interface));
++	if (new_interface == NULL) {
++		goto error;
++	}
++
++	new_interface->name = strdup("org.freedesktop.DBus.Introspectable");
++	new_interface->members = introspectable_members;
++	wl_list_insert(interfaces, &new_interface->link);
++
++	// Create the path with the new interface list
++	new_path = malloc(sizeof(struct path));
++	if (new_path == NULL) {
++		goto error;
++	}
++
++	new_path->path = strdup(path_name);
++	new_path->interfaces = interfaces;
++	new_path->introspection_data = NULL; // This will be set later.
++
++	// ... and also register it.
++	// We merge userdata with the interfaces list in a struct
++	// vtable_userdata here, so vtable_dispatch will know what interfaces to
++	// traverse, and what userdata to pass to the actual handler functions.
++	data = malloc(sizeof(struct vtable_userdata));
++	if (data == NULL) {
++		goto error;
++	}
++
++	data->interfaces = interfaces;
++	data->userdata = userdata;
++	if (!dbus_connection_try_register_object_path(bus, path_name, &dbus_vtable,
++			data, NULL)) {
++		goto error;
++	}
++
++	// Append the path to the list of paths
++	wl_list_insert(paths, &new_path->link);
++
++	return new_path;
++
++error:
++	free(data);
++	free(new_path);
++	free(new_interface);
++	free(interfaces);
++	return NULL;
++}
++
+ int sd_bus_add_object_vtable(sd_bus *bus, sd_bus_slot **slot,
+-		const char *path_name, const char *interface,
++		const char *path_name, const char *interface_name,
+ 		const sd_bus_vtable *vtable, void *userdata) {
+-	int ret = 0;
+ 
+ 	if (paths == NULL) {
+ 		paths = malloc(sizeof(struct path));
+@@ -249,90 +314,46 @@ int sd_bus_add_object_vtable(sd_bus *bus, sd_bus_slot **slot,
+ 		wl_list_init(paths);
+ 	}
+ 
+-	// See if this path is already registered. If it is, it must have at least
+-	// one interface, so get a pointer to the interfaces list.
+-	struct wl_list *interfaces = NULL;
++	// See if this path is already registered, ...
+ 	struct path *p, *path = NULL;
+ 	wl_list_for_each(p, paths, link) {
+ 		if (strcmp(path_name, p->path) == 0) {
+ 			path = p;
+-			interfaces = p->interfaces;
+ 			break;
+ 		}
+ 	}
+ 
+-	if (interfaces == NULL) {
+-		// Path was not registered before, so first we create an interface list,
+-		// and append Introspectable to it. We want every path to implement
+-		// org.freedesktop.DBus.Introspectable.
+-		// TODO: Also implement the following:
+-		//        - org.freedesktop.DBus.Peer
+-		//        - org.freedesktop.DBus.Properties
+-		interfaces = malloc(sizeof(struct wl_list));
+-		if (interfaces == NULL) {
+-			ret = -ENOMEM;
+-			goto finish;
+-		}
+-		wl_list_init(interfaces);
+-		struct interface *new_interface = malloc(sizeof(struct interface));
+-		if (interface == NULL) {
+-			ret = -ENOMEM;
+-			goto finish;
+-		}
+-		new_interface->name = strdup("org.freedesktop.DBus.Introspectable");
+-		new_interface->members = introspectable_members;
+-		wl_list_insert(interfaces, &new_interface->link);
+-
+-		// Create the path with the new interface list
+-		struct path *new_path = malloc(sizeof(struct path));
+-		if (new_path == NULL) {
+-			ret = -ENOMEM;
+-			goto finish;
+-		}
+-		new_path->path = strdup(path_name);
+-		new_path->interfaces = interfaces;
+-		new_path->introspection_data = NULL; // This will be set later.
+-		path = new_path;
+-
+-		// ... and also register it.
+-		// We merge userdata with the interfaces list in a struct
+-		// vtable_userdata here, so vtable_dispatch will know what interfaces to
+-		// traverse, and what userdata to pass to the actual handler functions.
+-		struct vtable_userdata *data = malloc(sizeof(struct vtable_userdata));
+-		if (data == NULL) {
+-			free(new_path);
+-			ret = -ENOMEM;
+-			goto finish;
+-		}
+-		data->interfaces = interfaces;
+-		data->userdata = userdata;
+-		if (!dbus_connection_try_register_object_path(bus, path_name,
+-				&dbus_vtable, data, NULL)) {
+-			free(new_path);
+-			ret = -ENXIO;
+-			goto finish;
+-		}
++	// ... and if it is not, register it.
++	if (path == NULL && 
++			(path = register_new_path(bus, path_name, userdata)) == NULL) {
++		return -ENOMEM;
+ 	}
+ 
+-	//TODO: Decide what to do if interface is already registered. Replace
+-	//memeber list? Append new members to list? Throw an error?
+-
+-	// Append the new interface to the path's interface list.
+-	struct interface *new_interface = malloc(sizeof(struct interface));
+-	if (new_interface == NULL) {
+-		ret = -ENOMEM;
+-		goto finish;
++	// See if the path already has an interface with this name, ...
++	struct interface *i, *interface = NULL;
++	wl_list_for_each(i, path->interfaces, link) {
++		if (strcmp(i->name, interface_name) == 0) {
++			interface = i;
++			break;
++		}
+ 	}
+-	new_interface->name = strdup(interface);
+-	new_interface->members = vtable;
+-	wl_list_insert(interfaces, &new_interface->link);
+ 
+-	// Append the path to the list of paths
+-	wl_list_insert(paths, &path->link);
++	// ... and create it, if not. If it does, replace the vtable for the
++	// existing interface.
++	if (interface == NULL) {
++		interface = malloc(sizeof(struct interface));
++		if (interface == NULL) {
++			return -ENOMEM;
++		}
++		interface->name = strdup(interface_name);
++		interface->members = vtable;
++		wl_list_insert(path->interfaces, &interface->link);
++	} else {
++		interface->members = vtable;
++	}
+ 
+ 	// (Re)generate introspection XML for this path.
+ 	generate_introspection_data(path);
+ 
+-finish:
+-	return ret;
++	return 0;
+ }
+diff --git a/include/subd-sdbus.h b/include/subd-sdbus.h
+index 8d77600..e7d177d 100644
+--- a/include/subd-sdbus.h
++++ b/include/subd-sdbus.h
+@@ -137,6 +137,6 @@ int sd_bus_reply_method_return(sd_bus_message *msg, const char *signature, ...);
+ int sd_bus_send(sd_bus *bus, sd_bus_message *msg, dbus_uint32_t *cookie);
+ 
+ int sd_bus_add_object_vtable(sd_bus *bus, sd_bus_slot **slot, const char *path_name,
+-	const char *interface, const sd_bus_vtable *vtable, void *data);
++	const char *interface_name, const sd_bus_vtable *vtable, void *userdata);
+ 
+ #endif
+-- 
+2.27.0
+
+
+From 500977a0c32607faf3533ecf46fad1b8862dce7f Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Mon, 29 Oct 2018 14:40:36 +0100
+Subject: [PATCH 11/18] Add feature test macros where necessary
+
+strdup requires _POSIX_C_SOURCE 200112L
+open_memstream requires _POSIX_C_SOURCE 200809L
+---
+ dbus/subd-sdbus.c  | 1 +
+ dbus/subd-vtable.c | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/dbus/subd-sdbus.c b/dbus/subd-sdbus.c
+index 3df1a0f..a6cb0a5 100644
+--- a/dbus/subd-sdbus.c
++++ b/dbus/subd-sdbus.c
+@@ -1,3 +1,4 @@
++#define _POSIX_C_SOURCE 200112L
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <string.h>
+diff --git a/dbus/subd-vtable.c b/dbus/subd-vtable.c
+index c2aed8d..684f26d 100644
+--- a/dbus/subd-vtable.c
++++ b/dbus/subd-vtable.c
+@@ -1,3 +1,4 @@
++#define _POSIX_C_SOURCE 200809L
+ #include <errno.h>
+ #include <stdbool.h>
+ #include <stdio.h>
+-- 
+2.27.0
+
+
+From 0d470a00f28c6140cbf7712a4248cf5b7f533d74 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Mon, 29 Oct 2018 17:34:30 +0100
+Subject: [PATCH 12/18] Fix actions
+
+Actions were not working, because I misunderstood the return values of
+the sd_bus_message_read function. The makoctl.libdbus script also
+needed a fix because dbus-send's syntax for message arguments differs
+from busctl's.
+---
+ dbus/subd-sdbus.c | 2 +-
+ makoctl.libdbus   | 2 +-
+ 2 files changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/dbus/subd-sdbus.c b/dbus/subd-sdbus.c
+index a6cb0a5..7282a69 100644
+--- a/dbus/subd-sdbus.c
++++ b/dbus/subd-sdbus.c
+@@ -213,7 +213,7 @@ int sd_bus_message_readv(sd_bus_message *msg, const char *signature, va_list ap)
+ 		dbus_message_iter_next(msg->iter);
+ 	} while (dbus_signature_iter_next(&iter));
+ 
+-	return dbus_message_iter_has_next(msg->iter);
++	return 1;
+ }
+ 
+ int sd_bus_message_read(sd_bus_message *msg, const char *signature, ...) {
+diff --git a/makoctl.libdbus b/makoctl.libdbus
+index 3d92d24..6c287d0 100755
+--- a/makoctl.libdbus
++++ b/makoctl.libdbus
+@@ -37,7 +37,7 @@ case "$1" in
+ 	if [ -z "$action" ] ; then
+ 		action="default"
+ 	fi
+-	call InvokeAction "s" "$action"
++	call InvokeAction "string:$action"
+ 	;;
+ "reload")
+ 	call Reload
+-- 
+2.27.0
+
+
+From 7f0d9041bec25c24fc1000fafa9b9c97aabad807 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Tue, 30 Oct 2018 17:49:47 +0100
+Subject: [PATCH 13/18] Change iters field from wl_list* to wl_list
+
+There's no need to dynamically allocate the list that represents the
+message's iterator stack in sd_bus_message.
++bonus: Fixed two typos.
+---
+ dbus/subd-sdbus.c    | 24 +++++++++---------------
+ dbus/subd-vtable.c   | 10 +++-------
+ include/subd-sdbus.h |  4 ++--
+ 3 files changed, 14 insertions(+), 24 deletions(-)
+
+diff --git a/dbus/subd-sdbus.c b/dbus/subd-sdbus.c
+index 7282a69..012f3e3 100644
+--- a/dbus/subd-sdbus.c
++++ b/dbus/subd-sdbus.c
+@@ -62,11 +62,7 @@ int sd_bus_message_new_method_return(sd_bus_message *msg, sd_bus_message **newms
+ 	new_message->ref_count = 1;
+ 
+ 	//Also initialize the sd_bus_message's iterator stack, ...
+-	new_message->iters = malloc(sizeof(struct wl_list));
+-	if (new_message->iters == NULL) {
+-		goto error;
+-	}
+-	wl_list_init(new_message->iters);
++	wl_list_init(&new_message->iters);
+ 
+ 	// ... and push a new append iterator to it.
+ 	iter = malloc(sizeof(struct msg_iter));
+@@ -74,7 +70,7 @@ int sd_bus_message_new_method_return(sd_bus_message *msg, sd_bus_message **newms
+ 		goto error;
+ 	}
+ 	dbus_message_iter_init_append(new_message->message, &iter->iter);
+-	wl_list_insert(new_message->iters, &iter->link);
++	wl_list_insert(&new_message->iters, &iter->link);
+ 	new_message->iter = &iter->iter;
+ 
+ 	*newmsg = new_message;
+@@ -82,7 +78,6 @@ int sd_bus_message_new_method_return(sd_bus_message *msg, sd_bus_message **newms
+ 
+ error:
+ 	free(iter);
+-	free(new_message->iters);
+ 	free(new_message);
+ 	dbus_message_unref(message);
+ 	*newmsg = NULL;
+@@ -99,7 +94,7 @@ int sd_bus_message_open_container(sd_bus_message *msg, char type,
+ 	if (!dbus_message_iter_open_container(msg->iter, type, signature, &sub->iter)) {
+ 		goto error;
+ 	}
+-	wl_list_insert(msg->iters, &sub->link);
++	wl_list_insert(&msg->iters, &sub->link);
+ 	msg->iter = &sub->iter;
+ 
+ 	return 0;
+@@ -111,11 +106,11 @@ error:
+ 
+ int sd_bus_message_close_container(sd_bus_message *msg) {
+ 	// Remove the iterator we want to close from from the iterator stack
+-	struct msg_iter *iter = wl_container_of(msg->iters->next, iter, link);
++	struct msg_iter *iter = wl_container_of(msg->iters.next, iter, link);
+ 	wl_list_remove(&iter->link);
+ 
+ 	// Set msg's current iterator to the top of the iterator stack.
+-	struct msg_iter *new_head = wl_container_of(msg->iters->next, iter, link);
++	struct msg_iter *new_head = wl_container_of(msg->iters.next, iter, link);
+ 	msg->iter = &new_head->iter;
+ 
+ 	// Close the container.
+@@ -158,10 +153,9 @@ void sd_bus_message_unref(sd_bus_message *msg) {
+ 	dbus_message_unref(msg->message);
+ 	if (--msg->ref_count == 0) {
+ 		struct msg_iter *iter, *itertmp = NULL;
+-		wl_list_for_each_safe(iter, itertmp, msg->iters, link) {
++		wl_list_for_each_safe(iter, itertmp, &msg->iters, link) {
+ 			free(iter);
+ 		}
+-		free(msg->iters);
+ 		free(msg);
+ 	}
+ }
+@@ -292,7 +286,7 @@ int sd_bus_message_enter_container(sd_bus_message *msg, char type,
+ 	}
+ 
+ 	dbus_message_iter_recurse(msg->iter, &sub_iter->iter);
+-	wl_list_insert(msg->iters, &sub_iter->link);
++	wl_list_insert(&msg->iters, &sub_iter->link);
+ 	msg->iter = &sub_iter->iter;
+ 
+ 	return dbus_message_iter_has_next(&sub_iter->iter);
+@@ -300,12 +294,12 @@ int sd_bus_message_enter_container(sd_bus_message *msg, char type,
+ 
+ int sd_bus_message_exit_container(sd_bus_message *msg) {
+ 	// Remove the iterator we want to exit from from the iterator stack
+-	struct msg_iter *iter = wl_container_of(msg->iters->next, iter, link);
++	struct msg_iter *iter = wl_container_of(msg->iters.next, iter, link);
+ 	wl_list_remove(&iter->link);
+ 
+ 	// Set msg's current iterator to the top of the iterator stack, and use
+ 	// dbus_message_iter_next to "step over" the iterator we are exiting.
+-	iter = wl_container_of(msg->iters->next, iter, link);
++	iter = wl_container_of(msg->iters.next, iter, link);
+ 	msg->iter = &iter->iter;
+ 	dbus_message_iter_next(msg->iter);
+ 
+diff --git a/dbus/subd-vtable.c b/dbus/subd-vtable.c
+index 684f26d..f2b6d5a 100644
+--- a/dbus/subd-vtable.c
++++ b/dbus/subd-vtable.c
+@@ -173,18 +173,14 @@ static bool call_method(const struct subd_member *member, DBusConnection *conn,
+ 	message->bus = conn;
+ 	message->message = msg;
+ 	message->ref_count = 1;
+-	message->iters = malloc(sizeof(struct wl_list));
+-	if (message->iters == NULL) {
+-		return false;
+-	}
+-	wl_list_init(message->iters);
++	wl_list_init(&message->iters);
+ 
+ 	struct msg_iter *iter = malloc(sizeof(struct msg_iter));
+ 	if (iter == NULL) {
+ 		return false;
+ 	}
+ 	dbus_message_iter_init(message->message, &iter->iter);
+-	wl_list_insert(message->iters, &iter->link);
++	wl_list_insert(&message->iters, &iter->link);
+ 	message->iter = &iter->iter;
+ 
+ 	DBusError error;
+@@ -325,7 +321,7 @@ int sd_bus_add_object_vtable(sd_bus *bus, sd_bus_slot **slot,
+ 	}
+ 
+ 	// ... and if it is not, register it.
+-	if (path == NULL && 
++	if (path == NULL &&
+ 			(path = register_new_path(bus, path_name, userdata)) == NULL) {
+ 		return -ENOMEM;
+ 	}
+diff --git a/include/subd-sdbus.h b/include/subd-sdbus.h
+index e7d177d..b676d61 100644
+--- a/include/subd-sdbus.h
++++ b/include/subd-sdbus.h
+@@ -18,7 +18,7 @@ typedef struct DBusError sd_bus_error;
+ typedef struct subd_member sd_bus_vtable;
+ 
+ /**
+- * his is not used, but typedef-d to preserve sd-bus function signatures.
++ * This is not used, but typedef-d to preserve sd-bus function signatures.
+  */
+ typedef int sd_bus_slot;
+ 
+@@ -39,7 +39,7 @@ typedef struct sd_bus_message {
+ 	sd_bus *bus;
+ 	DBusMessage *message;
+ 	DBusMessageIter *iter;
+-	struct wl_list *iters;
++	struct wl_list iters;
+ 	int ref_count;
+ } sd_bus_message;
+ 
+-- 
+2.27.0
+
+
+From 13817ae9b5f371d0a84934dedcdbd5aecd1ebfc3 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Wed, 31 Oct 2018 06:14:16 +0100
+Subject: [PATCH 14/18] Fix watch storage capacity increment
+
+The return value of successful realloc calls was ignored.
+This commit also replaces malloc with calloc for the DBusWatch * and
+pollfd arrays, and improves deallocation in case of errors.
+---
+ dbus/subd-watch.c | 31 +++++++++++++++++++------------
+ 1 file changed, 19 insertions(+), 12 deletions(-)
+
+diff --git a/dbus/subd-watch.c b/dbus/subd-watch.c
+index 5b6190e..aa85c81 100644
+--- a/dbus/subd-watch.c
++++ b/dbus/subd-watch.c
+@@ -16,14 +16,24 @@ static dbus_bool_t add_watch(DBusWatch *watch, void *data) {
+ 
+ 	if (watches->length == watches->capacity) {
+ 		int c = watches->capacity + 10;
+-		void *t1 = realloc(watches->fds, sizeof(struct pollfd) * c);
+-		void *t2 = realloc(watches->watches, sizeof(DBusWatch *) * c);
+-		if (t1 == NULL || t2 == NULL) {
++
++		void *new_fds = realloc(watches->fds, sizeof(struct pollfd) * c);
++		if (new_fds != NULL) {
++			watches->fds = new_fds;
++		} else {
+ 			sem_post(&watches->mutex);
+ 			return FALSE;
++		}
++
++		void *new_watches = realloc(watches->watches, sizeof(DBusWatch *) * c);
++		if (new_watches != NULL) {
++			watches->watches = new_watches;
+ 		} else {
+-			watches->capacity = c;
++			sem_post(&watches->mutex);
++			return FALSE;
+ 		}
++
++		watches->capacity = c;
+ 	}
+ 
+ 	short mask = 0;
+@@ -89,8 +99,8 @@ struct subd_watches *subd_init_watches(struct DBusConnection *connection,
+ 
+ 	watches->capacity = 10 + size;
+ 	watches->length = size;
+-	watches->fds = malloc(watches->capacity * sizeof(struct pollfd));
+-	watches->watches = malloc(watches->capacity * sizeof(DBusWatch*));
++	watches->fds = calloc(watches->capacity, sizeof(struct pollfd));
++	watches->watches = calloc(watches->capacity, sizeof(DBusWatch*));
+ 	if (watches->fds == NULL || watches->watches == NULL) {
+ 		error_code = DBUS_ERROR_NO_MEMORY;
+ 		goto error;
+@@ -131,12 +141,9 @@ struct subd_watches *subd_init_watches(struct DBusConnection *connection,
+ 
+ error:
+ 	if (watches != NULL) {
+-		if (watches->fds != NULL) {
+-			free(watches->fds);
+-		}
+-		if (watches->watches != NULL) {
+-			free(watches->watches);
+-		}
++		free(watches->fds);
++		free(watches->watches);
++		free(watches);
+ 	}
+ 	dbus_set_error(error, error_code, NULL);
+ 	return NULL;
+-- 
+2.27.0
+
+
+From 2c44cae7fd52ce21c20d5289af7803e757bf1206 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Wed, 31 Oct 2018 16:02:40 +0100
+Subject: [PATCH 15/18] Change subd_watches to subd_watch_store
+
+I use plurals in variable names to imply an array, or some kind of list,
+and this is a struct (that contains two arrays, but still). Also things
+like watches->watches could be confusing.
+---
+ dbus/subd-watch.c    | 104 +++++++++++++++++++++----------------------
+ event-loop.c         |  10 ++---
+ include/event-loop.h |   2 +-
+ include/subd.h       |   8 ++--
+ 4 files changed, 62 insertions(+), 62 deletions(-)
+
+diff --git a/dbus/subd-watch.c b/dbus/subd-watch.c
+index aa85c81..718ea78 100644
+--- a/dbus/subd-watch.c
++++ b/dbus/subd-watch.c
+@@ -6,34 +6,34 @@
+ #include "subd.h"
+ 
+ static dbus_bool_t add_watch(DBusWatch *watch, void *data) {
+-	struct subd_watches *watches = data;
+-	sem_wait(&watches->mutex);
++	struct subd_watch_store *watch_store = data;
++	sem_wait(&watch_store->mutex);
+ 
+ 	if (!dbus_watch_get_enabled(watch)) {
+-		sem_post(&watches->mutex);
++		sem_post(&watch_store->mutex);
+ 		return TRUE;
+ 	}
+ 
+-	if (watches->length == watches->capacity) {
+-		int c = watches->capacity + 10;
++	if (watch_store->length == watch_store->capacity) {
++		int c = watch_store->capacity + 10;
+ 
+-		void *new_fds = realloc(watches->fds, sizeof(struct pollfd) * c);
++		void *new_fds = realloc(watch_store->fds, sizeof(struct pollfd) * c);
+ 		if (new_fds != NULL) {
+-			watches->fds = new_fds;
++			watch_store->fds = new_fds;
+ 		} else {
+-			sem_post(&watches->mutex);
++			sem_post(&watch_store->mutex);
+ 			return FALSE;
+ 		}
+ 
+-		void *new_watches = realloc(watches->watches, sizeof(DBusWatch *) * c);
++		void *new_watches = realloc(watch_store->watches, sizeof(DBusWatch *) * c);
+ 		if (new_watches != NULL) {
+-			watches->watches = new_watches;
++			watch_store->watches = new_watches;
+ 		} else {
+-			sem_post(&watches->mutex);
++			sem_post(&watch_store->mutex);
+ 			return FALSE;
+ 		}
+ 
+-		watches->capacity = c;
++		watch_store->capacity = c;
+ 	}
+ 
+ 	short mask = 0;
+@@ -47,35 +47,35 @@ static dbus_bool_t add_watch(DBusWatch *watch, void *data) {
+ 
+ 	int fd = dbus_watch_get_unix_fd(watch);
+ 	struct pollfd pollfd = {fd, mask, 0};
+-	int index = watches->length++;
+-	watches->fds[index] = pollfd;
+-	watches->watches[index] = watch;
++	int index = watch_store->length++;
++	watch_store->fds[index] = pollfd;
++	watch_store->watches[index] = watch;
+ 
+-	sem_post(&watches->mutex);
++	sem_post(&watch_store->mutex);
+ 	return TRUE;
+ }
+ 
+ static void remove_watch(DBusWatch *watch, void *data) {
+-	struct subd_watches *watches = data;
+-	sem_wait(&watches->mutex);
++	struct subd_watch_store *watch_store = data;
++	sem_wait(&watch_store->mutex);
+ 
+ 	int index = -1;
+-	for (int i = 0; i < watches->length; ++i) {
+-		if (watches->watches[i] == watch) {
++	for (int i = 0; i < watch_store->length; ++i) {
++		if (watch_store->watches[i] == watch) {
+ 			index = i;
+ 			break;
+ 		}
+ 	}
+ 
+ 	if (index != -1) {
+-		--watches->length;
+-		memmove(&watches->fds[index], &watches->fds[index + 1],
+-			sizeof(struct pollfd) * watches->length - index);
+-		memmove(&watches->watches[index], &watches->watches[index + 1],
+-			sizeof(DBusWatch *) * watches->length - index);
++		--watch_store->length;
++		memmove(&watch_store->fds[index], &watch_store->fds[index + 1],
++			sizeof(struct pollfd) * watch_store->length - index);
++		memmove(&watch_store->watches[index], &watch_store->watches[index + 1],
++			sizeof(DBusWatch *) * watch_store->length - index);
+ 	}
+ 
+-	sem_post(&watches->mutex);
++	sem_post(&watch_store->mutex);
+ }
+ 
+ static void toggle_watch(DBusWatch *watch, void *data) {
+@@ -86,22 +86,22 @@ static void toggle_watch(DBusWatch *watch, void *data) {
+ 	}
+ }
+ 
+-struct subd_watches *subd_init_watches(struct DBusConnection *connection,
+-		struct pollfd *fds, int size, DBusError *error) {
++struct subd_watch_store *subd_init_watches(DBusConnection *conn,
++		struct pollfd *fds, int size, DBusError *err) {
+ 	const char *error_code = NULL;
+ 
+ 	// Initialize the watches structure.
+-	struct subd_watches *watches = malloc(sizeof(struct subd_watches));
+-	if (watches == NULL) {
++	struct subd_watch_store *watch_store = malloc(sizeof(struct subd_watch_store));
++	if (watch_store == NULL) {
+ 		error_code = DBUS_ERROR_NO_MEMORY;
+ 		goto error;
+ 	}
+ 
+-	watches->capacity = 10 + size;
+-	watches->length = size;
+-	watches->fds = calloc(watches->capacity, sizeof(struct pollfd));
+-	watches->watches = calloc(watches->capacity, sizeof(DBusWatch*));
+-	if (watches->fds == NULL || watches->watches == NULL) {
++	watch_store->capacity = 10 + size;
++	watch_store->length = size;
++	watch_store->fds = calloc(watch_store->capacity, sizeof(struct pollfd));
++	watch_store->watches = calloc(watch_store->capacity, sizeof(DBusWatch*));
++	if (watch_store->fds == NULL || watch_store->watches == NULL) {
+ 		error_code = DBUS_ERROR_NO_MEMORY;
+ 		goto error;
+ 	}
+@@ -109,7 +109,7 @@ struct subd_watches *subd_init_watches(struct DBusConnection *connection,
+ 	// Initialize a semaphore for the watches. It is needed to prevent the add,
+ 	// remove and toggle functions accessing the watch storage while it is being
+ 	// processed by subd_process_watches.
+-	if (sem_init(&watches->mutex, 0, 1) == -1) {
++	if (sem_init(&watch_store->mutex, 0, 1) == -1) {
+ 		if (errno == EINVAL) {
+ 			error_code = DBUS_ERROR_INVALID_ARGS;
+ 		} else {
+@@ -120,41 +120,41 @@ struct subd_watches *subd_init_watches(struct DBusConnection *connection,
+ 
+ 	// Add any non-dbus file descriptors.
+ 	for (int i = 0; i < size; ++i) {
+-		watches->fds[i] = (struct pollfd){
++		watch_store->fds[i] = (struct pollfd){
+ 			.fd = fds->fd,
+ 			.events = fds->events
+ 		};
+-		watches->watches[i] = NULL;
++		watch_store->watches[i] = NULL;
+ 		++fds;
+ 	}
+ 
+ 	// Register the add, remove, and toggle functions.
+ 	// NOTE: Can't use the free_data_function argument to automatically free
+ 	// watches when connection finalizes, because sometimes it does not work.
+-	if (!dbus_connection_set_watch_functions(connection, add_watch,
+-			remove_watch, toggle_watch, watches, NULL)) {
++	if (!dbus_connection_set_watch_functions(conn, add_watch, remove_watch,
++			toggle_watch, watch_store, NULL)) {
+ 		error_code = DBUS_ERROR_NO_MEMORY;
+ 		goto error;
+ 	}
+ 
+-	return watches;
++	return watch_store;
+ 
+ error:
+-	if (watches != NULL) {
+-		free(watches->fds);
+-		free(watches->watches);
+-		free(watches);
++	if (watch_store != NULL) {
++		free(watch_store->fds);
++		free(watch_store->watches);
++		free(watch_store);
+ 	}
+-	dbus_set_error(error, error_code, NULL);
++	dbus_set_error(err, error_code, NULL);
+ 	return NULL;
+ }
+ 
+-void subd_process_watches(DBusConnection *conn, struct subd_watches *watches) {
+-	sem_wait(&watches->mutex);
++void subd_process_watches(DBusConnection *conn, struct subd_watch_store *watch_store) {
++	sem_wait(&watch_store->mutex);
+ 
+-	for (int i = 0; i < watches->length; ++i) {
+-		struct pollfd pollfd = watches->fds[i];
+-		DBusWatch *watch = watches->watches[i];
++	for (int i = 0; i < watch_store->length; ++i) {
++		struct pollfd pollfd = watch_store->fds[i];
++		DBusWatch *watch = watch_store->watches[i];
+ 
+ 		if (watch == NULL || !dbus_watch_get_enabled(watch)) {
+ 			continue;
+@@ -182,5 +182,5 @@ void subd_process_watches(DBusConnection *conn, struct subd_watches *watches) {
+ 		}
+ 	}
+ 
+-	sem_post(&watches->mutex);
++	sem_post(&watch_store->mutex);
+ }
+diff --git a/event-loop.c b/event-loop.c
+index 338d718..463f4bc 100644
+--- a/event-loop.c
++++ b/event-loop.c
+@@ -93,13 +93,13 @@ bool init_event_loop(struct mako_event_loop *loop, sd_bus *bus,
+ 
+ 	DBusError error;
+ 	dbus_error_init(&error);
+-	loop->watches = subd_init_watches(bus, pollfds, MAKO_EVENT_COUNT, &error);
+-	if (loop->watches == NULL) {
++	loop->watch_store = subd_init_watches(bus, pollfds, MAKO_EVENT_COUNT, &error);
++	if (loop->watch_store == NULL) {
+ 		fprintf(stderr, "failed to initialize loop: %s\n", error.message);
+ 		return false;
+ 	}
+ 
+-	loop->fds = loop->watches->fds;
++	loop->fds = loop->watch_store->fds;
+ 	loop->bus = bus;
+ 	loop->display = display;
+ 	wl_list_init(&loop->timers);
+@@ -122,7 +122,7 @@ static int poll_event_loop(struct mako_event_loop *loop) {
+ #if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
+ 	return poll(loop->fds, MAKO_EVENT_COUNT, -1);
+ #else
+-	return poll(loop->fds, loop->watches->length, -1);
++	return poll(loop->fds, loop->watch_store->length, -1);
+ #endif
+ }
+ 
+@@ -287,7 +287,7 @@ int run_event_loop(struct mako_event_loop *loop) {
+ 			}
+ 		}
+ #else
+-		subd_process_watches(loop->bus, loop->watches);
++		subd_process_watches(loop->bus, loop->watch_store);
+ #endif
+ 
+ 		if (loop->fds[MAKO_EVENT_WAYLAND].revents & POLLIN) {
+diff --git a/include/event-loop.h b/include/event-loop.h
+index 4bd1e3b..2696037 100644
+--- a/include/event-loop.h
++++ b/include/event-loop.h
+@@ -27,7 +27,7 @@ struct mako_event_loop {
+ #if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
+ 	struct pollfd fds[MAKO_EVENT_COUNT];
+ #else
+-	struct subd_watches *watches;
++	struct subd_watch_store *watch_store;
+ 	struct pollfd *fds;
+ #endif
+ 	sd_bus *bus;
+diff --git a/include/subd.h b/include/subd.h
+index 33c997b..e9c1fab 100644
+--- a/include/subd.h
++++ b/include/subd.h
+@@ -14,7 +14,7 @@ struct pollfd;
+  * If you add non-watch file descriptors, make sure to set their corresponding
+  * watch to NULL, so that #subd_process_watches knows to skip them.
+  */
+-struct subd_watches {
++struct subd_watch_store {
+ 	struct pollfd *fds;
+ 	DBusWatch **watches;
+ 	int capacity;	
+@@ -28,14 +28,14 @@ struct subd_watches {
+  * remove and toggle functions that will handle automatic file descriptor
+  * additions/removals.
+  */
+-struct subd_watches *subd_init_watches(DBusConnection *conn, struct pollfd *fds,
+-	int size, DBusError *error);
++struct subd_watch_store *subd_init_watches(DBusConnection *conn,
++	struct pollfd *fds, int size, DBusError *err);
+ 
+ /**
+  * This function should be called from the event loop after a successful poll to
+  * handle the DBus watches that need to be handled (= the watches whose file
+  * descriptor returned an event).
+  */
+-void subd_process_watches(DBusConnection *conn, struct subd_watches *watches);
++void subd_process_watches(DBusConnection *conn, struct subd_watch_store *watch_store);
+ 
+ #endif
+-- 
+2.27.0
+
+
+From 89f22e2ef821ba2ce2a8c8623df8c8ba189a0703 Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Wed, 31 Oct 2018 20:31:35 +0100
+Subject: [PATCH 16/18] Increase POSIX version in subd-sdbus.c
+
+For some reason GLibc hides strdup with 200112L despite it being part of
+IEEE Std. 1003.1-2001.
+---
+ dbus/subd-sdbus.c | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/dbus/subd-sdbus.c b/dbus/subd-sdbus.c
+index 012f3e3..1093508 100644
+--- a/dbus/subd-sdbus.c
++++ b/dbus/subd-sdbus.c
+@@ -1,4 +1,4 @@
+-#define _POSIX_C_SOURCE 200112L
++#define _POSIX_C_SOURCE 200809L
+ #include <errno.h>
+ #include <stdlib.h>
+ #include <string.h>
+-- 
+2.27.0
+
+
+From 71f820a550584f51068578d16559db9abf0901eb Mon Sep 17 00:00:00 2001
+From: sghctoma <sghctoma@gmail.com>
+Date: Fri, 2 Nov 2018 13:53:48 +0100
+Subject: [PATCH 17/18] Fix Meson errors on Linux
+
+---
+ meson.build | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/meson.build b/meson.build
+index f23eff5..c928154 100644
+--- a/meson.build
++++ b/meson.build
+@@ -35,8 +35,9 @@ if logind.found()
+ else
+ 	logind = dependency('libelogind')
+ 	add_project_arguments('-DHAVE_ELOGIND=1', language: 'c')
+-sdbus = dependency(get_option('sdbus-provider'), required: get_option('sdbus'))
++sdbus = dependency('lib' + get_option('sdbus-provider'), required: get_option('sdbus'))
+ dbus1 = dependency('dbus-1', required: not sdbus.found())
++threads = dependency('threads')
+ wayland_client = dependency('wayland-client')
+ wayland_protos = dependency('wayland-protocols', version: '>=1.14')
+ 
+@@ -45,9 +46,10 @@ src_files = []
+ 
+ if sdbus.found()
+ 	mako_deps += sdbus
+-	add_project_arguments('-DHAVE_' + get_option('logind-provider').to_upper(), language: 'c')
++	add_project_arguments('-DHAVE_' + get_option('sdbus-provider').to_upper(), language: 'c')
+ else
+-	mako_deps += dbus1
++<<<<<<< HEAD
++	mako_deps += dependency('dbus-1')
+ 	src_files += [
+ 		'dbus/subd-vtable.c',
+ 		'dbus/subd-watch.c',
+@@ -77,6 +79,7 @@ mako_deps += [
+ 	glib,
+ 	gobject,
+ 	realtime,
++	threads,
+ 	wayland_client,
+ ]
+ 
+-- 
+2.27.0
+
+
+From d4c20dfe0de22c0f0f085914e5145d4c2a0566cc Mon Sep 17 00:00:00 2001
+From: Ecmel Berk Canlier <me@ecmelberk.com>
+Date: Wed, 1 Jul 2020 16:29:24 +0000
+Subject: [PATCH 18/18] Rebase Cleanup
+
+---
+ dbus/mako.c  |  4 +++-
+ dbus/xdg.c   |  4 ++--
+ event-loop.c |  5 +++--
+ meson.build  | 12 +-----------
+ 4 files changed, 9 insertions(+), 16 deletions(-)
+
+diff --git a/dbus/mako.c b/dbus/mako.c
+index 4946550..1cb0172 100644
+--- a/dbus/mako.c
++++ b/dbus/mako.c
+@@ -78,6 +78,7 @@ done:
+ 	return sd_bus_reply_method_return(msg, "");
+ }
+ 
++#if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
+ static int handle_list_notifications(sd_bus_message *msg, void *data,
+ 		sd_bus_error *ret_error) {
+ 	struct mako_state *state = data;
+@@ -135,7 +136,7 @@ static int handle_list_notifications(sd_bus_message *msg, void *data,
+ 			return ret;
+ 		}
+ 
+-		ret = sd_bus_message_append_basic(reply, 's', "actions");
++		ret = sd_bus_message_append(reply, 's', "actions");
+ 		if (ret < 0) {
+ 			return ret;
+ 		}
+@@ -192,6 +193,7 @@ static int handle_list_notifications(sd_bus_message *msg, void *data,
+ 	sd_bus_message_unref(reply);
+ 	return 0;
+ }
++#endif
+ 
+ static int handle_reload(sd_bus_message *msg, void *data,
+ 		sd_bus_error *ret_error) {
+diff --git a/dbus/xdg.c b/dbus/xdg.c
+index 4bfcfb0..e0d107a 100644
+--- a/dbus/xdg.c
++++ b/dbus/xdg.c
+@@ -201,8 +201,8 @@ static int handle_notify(sd_bus_message *msg, void *data,
+ 				}
+ 				notif->urgency = urgency;
+ 			} else {
+-				fprintf(stderr, "Unsupported variant type for \"urgency\": \"%s\"\n", contents);
+-				return -1;
++				fprintf(stderr, "Unsupported variant type for \"urgency\": \"%s\" (no-sd-dbus workaround: force urgency to normal)\n", contents);
++				notif->urgency = 1;
+ 			}
+ 		} else if (strcmp(hint, "category") == 0) {
+ 			const char *category = NULL;
+diff --git a/event-loop.c b/event-loop.c
+index 463f4bc..bac0ddb 100644
+--- a/event-loop.c
++++ b/event-loop.c
+@@ -237,7 +237,7 @@ int run_event_loop(struct mako_event_loop *loop) {
+ 	int ret = 0;
+ 	while (loop->running) {
+ 		errno = 0;
+-		ret = poll(loop->fds, MAKO_EVENT_COUNT, -1);
++		ret = poll_event_loop(loop);
+ 		if (!loop->running) {
+ 			ret = 0;
+ 			break;
+@@ -320,9 +320,10 @@ int run_event_loop(struct mako_event_loop *loop) {
+ 			fprintf(stderr, "failed to dispatch pending Wayland events\n");
+ 			break;
+ 		}
+-
++#if defined(HAVE_SYSTEMD) || defined(HAVE_ELOGIND)
+ 		// Same for D-Bus.
+ 		sd_bus_flush(loop->bus);
++#endif
+ 	}
+ 	return ret;
+ }
+diff --git a/meson.build b/meson.build
+index c928154..e9af7c2 100644
+--- a/meson.build
++++ b/meson.build
+@@ -28,13 +28,6 @@ gobject = dependency('gobject-2.0')
+ realtime = cc.find_library('rt')
+ wayland_client = dependency('wayland-client')
+ wayland_protos = dependency('wayland-protocols', version: '>=1.14')
+-
+-logind = dependency('libsystemd', required: false)
+-if logind.found()
+-	add_project_arguments('-DHAVE_SYSTEMD=1', language: 'c')
+-else
+-	logind = dependency('libelogind')
+-	add_project_arguments('-DHAVE_ELOGIND=1', language: 'c')
+ sdbus = dependency('lib' + get_option('sdbus-provider'), required: get_option('sdbus'))
+ dbus1 = dependency('dbus-1', required: not sdbus.found())
+ threads = dependency('threads')
+@@ -48,8 +41,7 @@ if sdbus.found()
+ 	mako_deps += sdbus
+ 	add_project_arguments('-DHAVE_' + get_option('sdbus-provider').to_upper(), language: 'c')
+ else
+-<<<<<<< HEAD
+-	mako_deps += dependency('dbus-1')
++	mako_deps += dbus1
+ 	src_files += [
+ 		'dbus/subd-vtable.c',
+ 		'dbus/subd-watch.c',
+@@ -72,8 +64,6 @@ mako_deps += [
+ 	cairo,
+ 	client_protos,
+ 	gdk_pixbuf,
+-	sdbus,
+-	logind,
+ 	pango,
+ 	pangocairo,
+ 	glib,
+-- 
+2.27.0
+
