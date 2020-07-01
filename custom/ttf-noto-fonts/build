@@ -1,6 +1,6 @@
 #!/bin/sh -e
 
-mkdir -p "$1/usr/share/fonts/TTF"
+mkdir -p "$1/usr/share/fonts/TTF/Noto"
 
-rm COPYING LICENSE
-mv * "$1/usr/share/fonts/TTF"
+rm LICENSE_OFL.txt README
+mv * "$1/usr/share/fonts/TTF/Noto"
