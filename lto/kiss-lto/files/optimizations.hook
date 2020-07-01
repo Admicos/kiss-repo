@@ -121,7 +121,7 @@ __rem "llvm" "-floop-nest-optimize"
 # binutils, but KISS probably doesn't have it yet.
 # https://bugs.gentoo.org/708340
 # https://sourceware.org/bugzilla/show_bug.cgi?id=25355
-if [ "$PKG" = "curl" ] || [ "$PKG" = "fribidi" ] || [ "$PKG" = "xcb-util-cursor" ] || [ "$PKG" = "jq" ] || [ "$PKG" = "pkgconf" ]; then
+if [ "$PKG" = "curl" ] || [ "$PKG" = "fribidi" ] || [ "$PKG" = "xcb-util-cursor" ] || [ "$PKG" = "jq" ] || [ "$PKG" = "pkgconf" ] || [ "$PKG" = "gtk+2" ] || [ "$PKG" = "dbus-glib" ]; then
     export lt_cv_sys_global_symbol_pipe="sed -n -e 's/^.*[ ]\\([ABCDGIRSTW][ABCDGIRSTW]*\\)[ ][ ]*\\([_A-Za-z][_A-Za-z0-9]*\\)\$/\\1 \\2 \\2/p' | sed '/ __gnu_lto/d'"
     export lt_cv_sys_global_symbol_to_cdecl=""
 
