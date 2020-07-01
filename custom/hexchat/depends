@@ -1,0 +1,9 @@
+meson
+gtk+2
+glib
+libressl
+
+# optional, check build file
+dbus
+dbus-glib
+libnotify

@@ -1,0 +1,26 @@
+#!/bin/sh -e
+
+export DESTDIR="$1"
+
+patch -p1 < gettext.patch
+
+# dbus / notifications enabled by default
+
+meson \
+    --prefix=/usr \
+    -Dwith-dbus=true \
+    -Dwith-libnotify=true \
+    -Dwith-libproxy=false \
+    -Dwith-libcanberra=false \
+    -Dwith-checksum=false \
+    -Dwith-exec=false \
+    -Dwith-fishlim=false \
+    -Dwith-sysinfo=false \
+    -Dwith-winamp=false \
+    -Dwith-perl=false \
+    -Dwith-lua=false \
+    -Dwith-appdata=false \
+    . output
+
+ninja -C output
+ninja -C output install
