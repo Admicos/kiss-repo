@@ -1,9 +1,0 @@
-#!/bin/sh -e
-
-mkdir -p "$1/usr/share/fonts/TTF/NotoCJK"
-mkdir -p "$1/usr/share/fontconfig/conf.avail"
-
-rm HISTORY LICENSE NEWS README*
-
-mv noto-fonts-cjk "$1/usr/share/fontconfig/conf.avail/70-noto-cjk.conf"
-mv * "$1/usr/share/fonts/TTF/NotoCJK"
