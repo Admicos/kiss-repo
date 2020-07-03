@@ -2,4 +2,4 @@
 
 echo "!!! kiss-hooked has been moved to the 'custom' repository."
 echo "!!! Please make sure you have it enabled, and before the LTO repository"
-exit 999
+exit 1
