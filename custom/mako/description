@@ -1,0 +1,1 @@
+ A lightweight Wayland notification daemon. Patched to remove the elogind dependency.
