@@ -1,4 +1,3 @@
 #!/bin/sh -e
 
-mkdir -p "$1/usr/bin"
-mv kiss-steal.sh "$1/usr/bin/kiss-steal"
+install -Dm755 kiss-steal.sh "$1/usr/bin/kiss-steal"
