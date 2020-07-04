@@ -1,9 +1,7 @@
-meson
-gtk+2
-glib
-libressl
-
-# optional, check build file
 dbus
 dbus-glib
+glib
+gtk+2
 libnotify
+libressl
+meson make

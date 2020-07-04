@@ -1,5 +1,3 @@
 #!/bin/sh -e
 
-mkdir -p "$1/usr/share/fonts/TTF/Caladea"
-
-mv * "$1/usr/share/fonts/TTF/Caladea"
+install -Dm744 *.ttf "$1/usr/share/fonts/TTF/Caladea"

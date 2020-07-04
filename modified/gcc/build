@@ -16,7 +16,7 @@ cd gcc-build
 IFS=. read -r gcc_version _ 2>/dev/null \
     < "$KISS_ROOT/var/db/kiss/installed/gcc/version" || gcc_version=null
 
-# using bootstrap-lto-lean requires bootstrap
+# Using bootstrap-lto-lean requires bootstrap.
 
 # Skip the bootstrap process if we are able.
 #case $2 in "$gcc_version"*)
@@ -24,7 +24,7 @@ IFS=. read -r gcc_version _ 2>/dev/null \
 #    bootstrap=--disable-bootstrap
 #esac
 
-# workaround some compilation issues
+# Workaround some compilation issues.
 export CC="${CC:-cc} -march=native"
 
 export libat_cv_have_ifunc=no
@@ -67,7 +67,7 @@ find "$1" -name libgtkpeer.a  -exec rm -f {} +
 find "$1" -name libgjsmalsa.a -exec rm -f {} +
 find "$1" -name libgij.a      -exec rm -f {} +
 
-# Some legacy programs will expect cc
+# Some legacy programs will expect cc.
 ln -s gcc "$1/usr/bin/cc"
 
 # POSIX compliance.

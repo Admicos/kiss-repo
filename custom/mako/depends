@@ -1,8 +1,7 @@
-meson
-wayland
-pango
 cairo
-gdk-pixbuf
 dbus
-
+gdk-pixbuf
 libnotify
+meson make
+pango
+wayland

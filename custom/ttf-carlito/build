@@ -1,6 +1,3 @@
 #!/bin/sh -e
 
-mkdir -p "$1/usr/share/fonts/TTF/Carlito"
-
-rm LICENSE
-mv * "$1/usr/share/fonts/TTF/Carlito"
+install -Dm744 *.ttf "$1/usr/share/fonts/TTF/Carlito"

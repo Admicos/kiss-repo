@@ -1,4 +1,3 @@
 #!/bin/sh -e
 
-mkdir -p "$1/etc/kiss-hooked/pre-build"
-cp "optimizations.hook" "$1/etc/kiss-hooked/pre-build"
+install -Dm755 optimizations.hook "$1/etc/kiss-hooked/pre-build/optimizations.hook"

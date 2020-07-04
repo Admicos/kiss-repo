@@ -3,5 +3,5 @@
 mkdir -p "$1/usr/share/icons"
 
 for theme in Papirus-Dark Papirus-Light Papirus ePapirus; do
-	cp -R "./$theme" "$1/usr/share/icons"
+    cp -R "./$theme" "$1/usr/share/icons"
 done

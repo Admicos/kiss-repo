@@ -5,5 +5,4 @@ cd src
 make
 make DESTDIR="$1" PREFIX=/usr install
 
-cp wg-quick/linux.bash "$1/usr/bin/wg-quick"
-chmod +x "$1/usr/bin/wg-quick"
+install -Dm755 wg-quick/linux.bash "$1/usr/bin/wg-quick"

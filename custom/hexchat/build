@@ -4,7 +4,7 @@ export DESTDIR="$1"
 
 patch -p1 < gettext.patch
 
-# dbus / notifications enabled by default
+# Dbus / notifications enabled by default.
 
 meson \
     --prefix=/usr \

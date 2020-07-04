@@ -1,6 +1,3 @@
 #!/bin/sh -e
 
-mkdir -p "$1/usr/share/fonts/TTF/Noto"
-
-rm LICENSE_OFL.txt README
-mv * "$1/usr/share/fonts/TTF/Noto"
+install -Dm744 *.ttf "$1/usr/share/fonts/TTF/Noto"

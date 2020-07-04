@@ -3,5 +3,5 @@
 mkdir -p "$1/usr/share/fonts"
 mkdir -p "$1/usr/share/fontconfig/conf.avail"
 
-cp Blobmoji.ttf "$1/usr/share/fonts"
-cp 75-blobmoji.conf "$1/usr/share/fontconfig/conf.avail"
+install -Dm744 Blobmoji.ttf     "$1/usr/share/fonts/Blobmoji.ttf"
+install -Dm744 75-blobmoji.conf "$1/usr/share/fontconfig/conf.avail"
