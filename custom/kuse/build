@@ -1,0 +1,8 @@
+#!/bin/sh -e
+
+install -Dm755 kuse "$1/usr/bin/kuse"
+install -Dm644 kuse-helper "$1/usr/lib/kuse-helper.sh"
+
+for file in *.txt; do
+    install -Dm644 "$file" "$1/usr/share/doc/kuse/$file"
+done

@@ -1,0 +1,74 @@
+#!/bin/sh -e
+
+USEPATH="${USEPATH:-/etc/kuse}"
+
+PKG="$1"
+FUNC="$2"
+
+_include_flags() {
+    flags="$1"
+    override_flags="$2"
+
+    removed_flags="$(echo "$override_flags" | grep "^-")"
+    added_flags="$(echo "$override_flags" | grep -v "^-")"
+
+    for flag_to_remove in $removed_flags; do
+        flag_to_remove="${flag_to_remove#?}" # https://stackoverflow.com/a/20195713
+        flags="$(echo "$flags" | sed "/^${flag_to_remove}$/d")"
+    done
+
+    echo "$flags"
+    if [ ! -z "$added_flags" ]; then
+        echo "$added_flags"
+    fi
+}
+
+list() {
+    FLAGS=""
+    if [ -e "$USEPATH/.global" ]; then
+        FLAGS="$(cat "$USEPATH/.global")"
+    fi
+
+    if [ -e "$USEPATH/$PKG" ]; then
+        FLAGS="$(_include_flags "$FLAGS" "$(cat "$USEPATH/$PKG")")"
+    fi
+
+    if [ ! -z "$KUSE" ]; then
+        KUSE="$(echo "$KUSE" | tr " " "\n")"
+        FLAGS="$(_include_flags "$FLAGS" "$KUSE")"
+    fi
+
+    vname="KUSE_$PKG"
+    vuses="$(eval "echo \"\$$vname\" | tr ' ' '\n'")"
+    if [ ! -z "$vuses" ]; then
+        FLAGS="$(_include_flags "$FLAGS" "$vuses")"
+    fi
+
+    echo "$FLAGS"
+}
+
+has() {
+    FLAG="$1"
+    if [ -z "$FLAG" ]; then
+        echo "'has' requires argument <flag>"
+        exit 2
+    fi
+
+    # use exec to pass exit value through
+    echo "$(list)" | exec grep -Fx "$FLAG"
+}
+
+if [ -z "$FUNC" ] || [ -z "$PKG" ]; then
+    echo "kuse <package> (list|has <flag>)"
+    exit 2
+fi
+
+shift 2 # remove the first two arguments as we already defined variables for them
+case "$FUNC" in
+    list | has)
+        $FUNC "$@"  # Call function $FUNC with all the remaining args
+        ;;
+    *)
+        echo "Unknown operation: $FUNC, run without arguments for help."
+        ;;
+esac

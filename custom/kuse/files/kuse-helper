@@ -1,0 +1,31 @@
+# vim: ft=sh
+
+# Source this file in your build scripts to access kuse flag helpers
+# Example:
+#     kh_package="packagename"       # IMPORTANT! Without this, this script
+#                                    # cannot know the package's name
+#     source /usr/lib/kuse-helper.sh
+
+# TODO: find own path, get dirname, use as package name
+
+
+# Usage:
+#     if kuse_has "flag"; then
+#         do thing and thing
+#     fi
+kuse_has() {
+    kuse "$kh_package" has "$1"
+    return "$?"
+}
+
+# Usage:
+#     ./configure \
+#         "$(kuse_if "flag" "--enable-thing")" \
+#         "$(kuse_if "otherflag" "--enable-other" "--disable-other")" \
+kuse_if() {
+    if kuse_has "$1"; then
+        echo "$2"
+    elif [ ! -z "$3" ]; then
+        echo "$3"
+    fi
+}

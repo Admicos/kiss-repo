@@ -1,0 +1,82 @@
+USER DOCUMENTATION                                            kuse 0.0.0
+
+
+
+DESCRIPTION:
+
+    kuse is a simple but powerful flag manager for kiss. kuse lets you
+    write build scripts that can enable or disable parts of a package
+    depending on user choice, without having to deal with forking and
+    keeping up-to-date.
+
+
+
+COMMAND LINE USAGE: kuse <package> (list|has <flag>)
+
+        <package>   The package to look up the enabled flags for.
+
+    AVAILABLE COMMANDS:
+
+        list        List all effective flags for <package>.
+
+        has <flag>  Check if <flag> is enabled for <package>.
+
+                    This command will exit with code 0 if the flag is
+                    enabled, 1 if it is not.
+
+                    If the flag is enabled, this command will also echo
+                    back the name of the flag, to allow for easier use
+                    in scripts.
+
+
+
+ENVIRONMENT VARIABLES:
+
+        $USEPATH    The path kuse will look in for flag configurations.
+                    (Defaults to /etc/kuse)
+
+        $KUSE       Space separated list of flags to apply to all
+                    packages. Optional
+
+        $KUSE_<pkg> Space separated list of flags to apply to
+                    <package>. Optional
+
+
+
+FLAG CONFIGURATION:
+
+    ENABLING FLAGS:
+
+        The enabled flags for each package should be added into
+        $USEPATH/<package> with one flag per line.
+
+        To enable flags globally, flags can be added into
+        $USEPATH/.global with one flag per line.
+
+        To enable flags for all packages in the current process, add the
+        flags in the $KUSE environment variable.
+
+        To enable flags for a specific package in the current process,
+        add the flags in the $KUSE_<package> environment variable.
+
+    DISABLING FLAGS FOR PACKAGES:
+
+        To disable a flag in a package, simply add the flag with a
+        dash (-) before it into $USEPATH/<package>, $KUSE, or
+        $KUSE_<package>
+
+        The $USEPATH/.global file CAN NOT disable flags. A line
+        beginning with a dash in that file will just be a recipe for
+        weird stuff.
+
+    FLAG PRIORITY:
+
+        All inputs except .global can disable flags. If a flag is set on
+        a later input, it will be re-enabled.
+
+        Inputs sorted from lowest to highest priority:
+
+        - $USEPATH/.global
+        - $USEPATH/<package>
+        - Environment variable: $KUSE
+        - Environment variable: $KUSE_<package>

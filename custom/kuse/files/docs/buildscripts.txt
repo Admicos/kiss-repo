@@ -1,0 +1,37 @@
+BUILD SCRIPT DOCUMENTATION                                    kuse 0.0.0
+
+
+
+DESCRIPTION:
+
+    kuse comes with a helper shell library to allow for easier usage in
+    build scripts.
+
+
+
+USAGE:
+
+    To use the helper library, source it near the beginning of your
+    build script:
+
+        kh_package="packagename"
+        source /usr/lib/kuse-helper.sh
+
+    IMPORTANT:  $kh_package MUST be defined, as there are no other
+                reliable ways to find which package this build script
+                is for.
+
+
+
+FUNCTIONS:
+
+        kuse_has <flag>:    Convenience alias for
+                            "kuse $kh_package has <flag>".
+
+        kuse_if <flag> <if_exists> [if_not_exists]:
+
+                            Prints out <if_exists> or [if_not_exists]
+                            depending on the status of <flag>. Useful
+                            for configuration scripts.
+
+                            [if_not_exists] is empty by default.
