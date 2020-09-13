@@ -1,6 +1,6 @@
 #!/bin/sh -e
 
-FILE="arc-theme_20200513-1_all.deb"
+FILE="arc-theme_20200819-1_all.deb"
 
 ar x "$FILE"
 tar xf data.tar.xz
