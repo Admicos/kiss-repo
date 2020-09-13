@@ -9,9 +9,17 @@ On your right however, you'll have the `modified` directory, which contains
 packages that will conflict with stuff in KISS repos (including community) and 
 should be added with care, if at all.
 
+
 And lastly, there is the `lto` directory, which contains configuration for 
 aggressive compiler optimizations. These aren't complete at all, and dragons willeat your passwords if you decide to use them. See the 
 [`kiss-lto`](lto/kiss-lto/README.md) package for more info.
+
+**IMPORTANT:** The `modified` and `lto` repositories are **no longer
+supported**, as I don't use them personally anymore. They are only here so the
+things I did won't be gone forever.
+
+I have a new `modified` repository at https://git.ebc.li/kiss/override if
+anyone cares about that.
 
 ## Notice
 
