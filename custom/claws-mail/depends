@@ -1,0 +1,8 @@
+bison build
+dbus
+flex build
+gnupg2
+gnutls
+gpgme
+gtk+2
+libetpan

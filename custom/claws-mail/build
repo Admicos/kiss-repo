@@ -1,0 +1,21 @@
+#!/bin/sh -e
+
+./configure \
+    --prefix=/usr \
+    --disable-jpilot \
+    --disable-maintainer-mode \
+    --disable-manual \
+    --disable-static \
+    --enable-gnutls \
+    --enable-pgpmime-plugin \
+    --enable-silent-rules
+
+make
+make DESTDIR="$1" install
+
+cd tools/
+make
+
+for FILE in $(find -maxdepth 1 -type f -and -perm /111 -or -name '*.conf'); do
+    install -D -m0755 "$FILE" "$1/usr/lib/claws-mail/tools/$FILE"
+done
