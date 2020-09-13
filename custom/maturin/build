@@ -1,0 +1,4 @@
+#!/bin/sh -e
+
+cargo build --release
+install -Dm755 target/release/maturin "$1/usr/bin/maturin"
