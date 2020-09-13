@@ -1,3 +1,9 @@
 #!/bin/sh -e
 
-install -Dm744 *.ttf "$1/usr/share/fonts/TTF/Noto"
+mkdir -p "$1/usr/share/fonts/TTF/Noto"
+
+rm LICENSE_OFL.txt README
+mv * "$1/usr/share/fonts/TTF/Noto"
+
+# ugly
+chmod a+r -R "$1/usr/share/fonts/TTF/Noto"
